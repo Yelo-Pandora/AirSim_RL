@@ -1,0 +1,66 @@
+# 忽略训练好的模型权重文件
+*.pth
+*.pt
+*.h5
+*.ckpt
+*.pb
+*.onnx
+# 忽略 TensorBoard 日志
+**/logs/
+**/events.out.tfevents.*
+
+# --- 项目特定目录 ---
+# 忽略 Data 文件夹下的所有数据集文件，但保留文件夹本身
+Data/*
+!Data/.gitkeep
+
+# 忽略 AirSim 环境可执行文件及关联的资源文件夹
+# 假设你的打包文件名包含 AirSim，或者你直接根据后缀屏蔽
+*.exe
+*.dll
+*.so
+*.app
+# 忽略 Unreal Engine 打包输出的文件夹（AirSim 通常会有这些文件夹）
+*_Data/
+*_Backups/
+MonoBleedingEdge/
+
+# --- Python 相关 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- 虚拟环境相关 ---
+venv/
+.venv/
+ENV/
+
+# --- IDE 相关 ---
+# 忽略 PyCharm/IntelliJ 配置文件 (你在截图里已经有了 .idea)
+.idea/
+.vscode/
+*.swp
+*.swo
+.vs/
+
+# --- 系统相关 ---
+.DS_Store
+Thumbs.db
