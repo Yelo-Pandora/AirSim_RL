@@ -1,0 +1,11 @@
+torch          # 深度学习核心
+gymnasium      # RL 环境标准
+numpy          # 矩阵运算
+pandas         # 数据集读取
+matplotlib     # 绘图
+scipy          # 辅助计算
+stable baseline3 # 一个强化学习框架
+msgpack==1.0.5 # python和airsim底层通信库
+tornado==4.5.3 # 
+msgpack-rpc-python #
+airsim         # airsim依赖安装比较特殊，需要到源码文件夹下编译
