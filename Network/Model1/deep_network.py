@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,36 +39,6 @@ class LDTED3FeatureExtractor(nn.Module):
             # 输出 32 维特征
             nn.Linear(128, 32)
         )
-
-    def downsample_depth(self, depth_img):
-        """
-        根据论文公式(1)，对 144x256 的深度图进行 16x16 的下采样，取最小值。
-        """
-        # 使用 PyTorch 的 max_pool2d 实现 min_pooling (取负数再取最大)
-        depth_tensor = torch.from_numpy(depth_img).unsqueeze(0).unsqueeze(0).float()
-        downsampled = -F.max_pool2d(-depth_tensor, kernel_size=16, stride=16)
-        return downsampled  # 输出尺寸 [1, 1, 9, 16]
-
-    def downsample_lidar(self, lidar_data):
-        """
-        根据论文 Fig.4 描述的极坐标下采样：
-        - 前方 (45°-134°): 每 2° 采样一次 (45个点)
-        - 前侧方 (0°-44°, 135°-179°): 每 3° 采样一次 (30个点)
-        - 后方 (180°-359°): 每 6° 采样一次 (30个点)
-        总计: 45 + 30 + 30 = 105 个点
-        """
-        # 假设 lidar_data 是 360 度的原始距离数据
-        indices = []
-        # 前方
-        indices.extend(range(45, 135, 2))
-        # 前侧方
-        indices.extend(range(0, 45, 3))
-        indices.extend(range(135, 180, 3))
-        # 后方
-        indices.extend(range(180, 360, 6))
-
-        downsampled = lidar_data[indices]
-        return torch.from_numpy(downsampled).float()
 
     def forward(self, depth_img, lidar_points, kin_vector):
         """
