@@ -5,67 +5,53 @@ import time
 import math
 
 
-def run_airsim_trace_monitor():
-    # 1. 连接 AirSim
+def run_airsim_mega_monitor():
+    # 1. 连接与初始化
     client = airsim.MultirotorClient()
     client.confirmConnection()
-
     v_name = "Drone1"
-    l_name = "Lidar1"  # 请确保 settings.json 中也是这个名字
+    l_name = "Lidar1"  # 请确保与 settings.json 一致
 
-    # --- 2. 轨迹绘制参数初始化 ---
-    last_pose = None
-    trace_color_rgba = [255, 0, 0, 1.0]  # 纯红色 (R, G, B, A)
-    trace_thickness = 10.0  # 线条厚度
-    trace_duration = 60.0  # 线条存留时间 (秒)
-    # -----------------------------------
-
-    # 3. 获取用户输入的坐标
-    print("\n" + "=" * 30)
+    # 2. 坐标输入处理 (兼容中英文逗号)
+    user_input = input("请输入目标坐标 X, Y, Z (如 15,15,-20): ")
+    user_input = user_input.replace('，', ',').replace(' ', '')
     try:
-        target_input = input("请输入目标坐标 X, Y, Z (例如: 20, 20, -10): ")
-        tx, ty, tz = map(float, target_input.split(','))
+        tx, ty, tz = map(float, user_input.split(','))
     except:
-        print("输入格式错误，使用默认坐标: 20, 20, -10")
         tx, ty, tz = 20.0, 20.0, -10.0
-    print("=" * 30 + "\n")
+        print(f"输入解析失败，使用默认值: {tx}, {ty}, {tz}")
 
-    # 4. 飞行初始化
     client.enableApiControl(True, vehicle_name=v_name)
     client.armDisarm(True, vehicle_name=v_name)
     client.takeoffAsync(vehicle_name=v_name).join()
 
-    # 开始异步飞向目标
-    print(f"正在飞向目标点: ({tx}, {ty}, {tz})...")
+    # 异步开始导航
     client.moveToPositionAsync(tx, ty, tz, velocity=3, vehicle_name=v_name)
 
     try:
         while True:
-            # --- 数据采集 ---
+            # --- [A] 数据提取 ---
             state = client.getMultirotorState(vehicle_name=v_name)
-            current_pose = state.kinematics_estimated.position  # 这是 airsim.Vector3r 对象
-            vel = state.kinematics_estimated.linear_velocity
+            k = state.kinematics_estimated
 
-            # --- 核心新增：绘制红色轨迹 ---
-            if last_pose is not None:
-                # 在当前位置打一个红色的点，持续60秒
-                # 即使没有 simDrawLines，通常也有 simPlotPoints
-                try:
-                    client.simPlotPoints(
-                        points=[current_pose],
-                        color_rgba=[255, 0, 0, 1.0],
-                        size=15,
-                        duration=60,
-                        is_persistent=False
-                    )
-                except AttributeError:
-                    # 如果连这个都没有，我们就在控制台提醒一下，转为2D轨迹预览
-                    pass
+            # 1. 坐标与距离
+            pos = k.position
+            dist = math.sqrt((pos.x_val - tx) ** 2 + (pos.y_val - ty) ** 2 + (pos.z_val - tz) ** 2)
 
-            last_pose = current_pose
-            # --------------------------------
+            # 2. 三轴线速度 (Linear Velocity)
+            lv = k.linear_velocity
 
-            # --- 图像处理与 UI 拼接 (保持之前的逻辑) ---
+            # 3. 三轴角加速度 (Angular Acceleration)
+            aa = k.angular_acceleration
+
+            # 4. 激光雷达数据
+            try:
+                lidar_data = client.getLidarData(lidar_name=l_name, vehicle_name=v_name)
+                lidar_pts = len(lidar_data.point_cloud) // 3
+            except:
+                lidar_pts = 0
+
+            # 5. 图像获取
             responses = client.simGetImages([
                 airsim.ImageRequest("0", airsim.ImageType.Scene, False, False),
                 airsim.ImageRequest("0", airsim.ImageType.DepthPlanar, True)
@@ -73,74 +59,102 @@ def run_airsim_trace_monitor():
 
             if len(responses) < 2: continue
 
-            img_rgb = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
-            img_rgb = img_rgb.reshape(responses[0].height, responses[0].width, 3).copy()
+            # --- [B] 图像处理 ---
+            # 1. 处理 RGB 转换
+            img_rgb_raw = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
+            img_rgb = img_rgb_raw.reshape(responses[0].height, responses[0].width, 3).copy()
 
-            img_depth = np.array(responses[1].image_data_float, dtype=np.float32).reshape(responses[1].height,
-                                                                                          responses[1].width)
-            img_depth[img_depth > 30] = 30
-            img_depth_vis = cv2.normalize(img_depth, None, 0, 255, cv2.NORM_MINMAX)
-            img_depth_vis = cv2.applyColorMap(np.uint8(img_depth_vis), cv2.COLORMAP_JET)
+            # 获取 RGB 的尺寸作为基准
+            target_h, target_w = img_rgb.shape[:2]
 
-            try:
-                lidar_data = client.getLidarData(lidar_name=l_name, vehicle_name=v_name)
-                lidar_pts = len(lidar_data.point_cloud) // 3
-            except:
-                lidar_pts = 0
+            # 2. 处理 深度图 转换
+            img_depth_raw = np.array(responses[1].image_data_float).reshape(responses[1].height, responses[1].width)
+            img_depth_raw[img_depth_raw > 30] = 30
+            img_depth_norm = cv2.normalize(img_depth_raw, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            img_depth_vis_raw = cv2.applyColorMap(img_depth_norm, cv2.COLORMAP_JET)
 
-            h1, w1 = img_rgb.shape[:2]
-            h2, w2 = img_depth_vis.shape[:2]
-            canvas_h = max(h1, h2, 550)
-            panel_w = 380
-            final_view = np.zeros((canvas_h, w1 + w2 + panel_w, 3), dtype=np.uint8)
+            # --- 核心修复：强制对齐尺寸 ---
+            # 将深度图拉伸/缩小到和 RGB 一样大，防止拼接报错
+            img_depth_vis = cv2.resize(img_depth_vis_raw, (target_w, target_h))
+            # --- [C] UI 布局拼接 ---
+            h, w = img_rgb.shape[:2]
+            # 创建宽大的画布：两张图的宽度 + 420像素的侧边栏
+            canvas_h = max(h, 720)
+            canvas_w = w * 2 + 420
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-            final_view[:h1, :w1] = img_rgb
-            final_view[:h2, w1:w1 + w2] = img_depth_vis
+            # 放置图像
+            canvas[:h, :w] = img_rgb
+            canvas[:h, w:w * 2] = img_depth_vis
 
-            speed = math.sqrt(vel.x_val ** 2 + vel.y_val ** 2 + vel.z_val ** 2)
-            dist_to_target = math.sqrt(
-                (current_pose.x_val - tx) ** 2 + (current_pose.y_val - ty) ** 2 + (current_pose.z_val - tz) ** 2)
+            # --- [D] 绘制右侧数据面板 (DataItems) ---
+            db_x = w * 2 + 25
+            line_y = 40
+            line_step = 28  # 行间距
 
-            db_x = w1 + w2 + 25
+            # 准备数据项列表: (文本, 颜色)
             data_items = [
-                (">> NAVIGATION & TRACE <<", (0, 0, 255)),  # 标题改为红色
+                (">> FLIGHT SYSTEM MONITOR <<", (0, 255, 255)),
                 (f"TIME: {time.strftime('%H:%M:%S')}", (200, 200, 200)),
-                ("-" * 30, (100, 100, 100)),
-                (f"TARGET POS: ({tx:.1f}, {ty:.1f}, {tz:.1f})", (255, 255, 255)),
-                (f"DIST TO TG: {dist_to_target:>8.2f} m", (0, 165, 255)),
-                ("-" * 30, (100, 100, 100)),
-                (f"CURRENT X: {current_pose.x_val:>8.2f} m", (0, 255, 0)),
-                (f"CURRENT Y: {current_pose.y_val:>8.2f} m", (0, 255, 0)),
-                (f"CURRENT Z: {current_pose.z_val:>8.2f} m", (0, 255, 0)),
-                ("-" * 30, (100, 100, 100)),
-                (f"SPEED:     {speed:>8.2f} m/s", (255, 0, 255)),
-                (f"LIDAR PTS: {lidar_pts:>8}", (0, 255, 0)),
-                ("-" * 30, (100, 100, 100)),
-                ("MISSION STATUS:", (0, 255, 255)),
-                ("NAVIGATING..." if dist_to_target > 1 else "GOAL REACHED!", (0, 255, 0)),
-                ("-" * 30, (100, 100, 100)),
-                ("HINT: Red line indicates path", (0, 0, 255))
+                ("-" * 35, (100, 100, 100)),
+
+                ("MISSION TARGET", (255, 255, 255)),
+                (f"  TARGET POS: {tx:.1f}, {ty:.1f}, {tz:.1f}", (255, 255, 255)),
+                (f"  DISTANCE TO GO: {dist:>8.2f} m", (0, 165, 255)),
+                ("-" * 35, (100, 100, 100)),
+
+                ("REAL-TIME POSITION (m)", (255, 255, 0)),
+                (f"  POS X: {pos.x_val:>8.2f}", (0, 255, 0)),
+                (f"  POS Y: {pos.y_val:>8.2f}", (0, 255, 0)),
+                (f"  POS Z: {pos.z_val:>8.2f}", (0, 255, 0)),
+                ("-" * 35, (100, 100, 100)),
+
+                ("LINEAR VELOCITY (m/s)", (255, 255, 0)),
+                (f"  Vx: {lv.x_val:>8.2f}", (0, 255, 255)),
+                (f"  Vy: {lv.y_val:>8.2f}", (0, 255, 255)),
+                (f"  Vz: {lv.z_val:>8.2f}", (0, 255, 255)),
+                ("-" * 35, (100, 100, 100)),
+
+                ("ANGULAR ACCEL (rad/s^2)", (255, 255, 0)),
+                (f"  Ax: {aa.x_val:>8.4f}", (255, 0, 255)),
+                (f"  Ay: {aa.y_val:>8.4f}", (255, 0, 255)),
+                (f"  Az: {aa.z_val:>8.4f}", (255, 0, 255)),
+                ("-" * 35, (100, 100, 100)),
+
+                (f"LIDAR POINTS: {lidar_pts:>8}", (0, 255, 0)),
+                ("STATUS: " + ("NAVIGATING" if dist > 1 else "GOAL REACHED"), (0, 255, 0)),
+                ("-" * 35, (100, 100, 100)),
+                ("Press 'Q' to End Session", (0, 0, 255))
             ]
 
-            for i, (text, color) in enumerate(data_items):
-                cv2.putText(final_view, text, (db_x, 45 + i * 28),
+            # 循环绘制文字
+            for text, color in data_items:
+                cv2.putText(canvas, text, (db_x, line_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+                line_y += line_step
 
-            cv2.imshow("AirSim Nav Hub with Trace", final_view)
+            # --- [E] 显示窗口 ---
+            cv2.imshow("AirSim All-in-One Dashboard", canvas)
 
-            if dist_to_target < 0.5:
+            # 到达判定与安全退出
+            if dist < 0.5:
                 client.hoverAsync(vehicle_name=v_name)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
     except Exception as e:
-        print(f"程序运行出错: {e}")
+        print(f"运行时发生错误: {e}")
     finally:
-        client.armDisarm(False, vehicle_name=v_name)
-        client.enableApiControl(False, vehicle_name=v_name)
+        # 退出时释放控制权，防止出现 IOLoop 错误
+        print("正在清理并退出...")
+        try:
+            client.armDisarm(False, vehicle_name=v_name)
+            client.enableApiControl(False, vehicle_name=v_name)
+        except:
+            pass
         cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    run_airsim_trace_monitor()
+    run_airsim_mega_monitor()
