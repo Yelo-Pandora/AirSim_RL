@@ -10,7 +10,7 @@ def run_airsim_full_data_waypoint_monitor():
     client = airsim.MultirotorClient()
     client.confirmConnection()
     v_name = "Drone1"
-    l_name = "MyHorizontalLidar"
+    l_name = "Lidar1"
 
     # 2. 坐标输入 (处理中英文逗号)
     print("\n" + "=" * 40)
