@@ -31,4 +31,6 @@ AirSim_RL/
 └── [AirSim_Env].exe      # AirSim 仿真环境的可执行文件（暂定存放在根目录）
 
 ```
-
+### #新增文件
+setting.json为AirSim无人机配置文件\
+默认路径C:\Users\Documents\AirSim 可直接进行替换
