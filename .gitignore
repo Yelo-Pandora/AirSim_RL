@@ -8,6 +8,7 @@
 # 忽略 TensorBoard 日志
 **/logs/
 **/events.out.tfevents.*
+tb_logs/
 
 # --- 项目特定目录 ---
 AirsimDemo/
