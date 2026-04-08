@@ -342,6 +342,7 @@ class AirSimUAVEnv(gym.Env):
         self.waypoints = []
         for i in range(1, 17):
             ratio = i / 16.0
+            # 确保航点的 Z 轴也是浮点数
             wp = self.current_start_pos + (self.current_target - self.current_start_pos) * ratio
             self.waypoints.append(wp)
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)
@@ -349,7 +350,11 @@ class AirSimUAVEnv(gym.Env):
         obs = self._get_obs()
         kin = obs["kinematics"]
         self.start_rel_pos = kin[0:3].copy()
-        self.start_dist = float(np.linalg.norm(self.start_rel_pos))
+        
+        # 使用目标和起点的绝对距离来计算 start_dist
+        # 防止 kin[0:3] 相对坐标原点偏差导致 D 计算过小
+        self.start_dist = float(np.linalg.norm(self.current_target - self.current_start_pos))
+        
         if self.start_dist < 1e-5:
             self.start_dist = 1.0
 

@@ -10,6 +10,7 @@
 **/events.out.tfevents.*
 
 # --- 项目特定目录 ---
+AirsimDemo/
 # 忽略 Data 文件夹下的所有数据集文件，但保留文件夹本身
 Data/*
 !Data/.gitkeep
