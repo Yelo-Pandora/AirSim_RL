@@ -1,6 +1,12 @@
 import os
 import numpy as np
 import torch
+import sys
+
+# 确保能优先找到根目录下的 airsim 源码
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+import airsim
 from stable_baselines3 import TD3
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv

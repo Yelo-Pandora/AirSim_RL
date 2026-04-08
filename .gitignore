@@ -10,8 +10,6 @@
 **/events.out.tfevents.*
 
 # --- 项目特定目录 ---
-# 忽略 AirSimDemo 文件夹，防止上传公用的 Unreal Engine 打包环境和本地日志
-AirSimDemo/
 # 忽略 Data 文件夹下的所有数据集文件，但保留文件夹本身
 Data/*
 !Data/.gitkeep
