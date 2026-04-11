@@ -70,7 +70,6 @@ class AirSimUAVEnv(gym.Env):
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
         self.start_dist = float(np.linalg.norm(self.start_rel_pos))                 # 起点与终点的距离
 
-        self.last_velocity = np.zeros(3, dtype=np.float32)
         self.dt = 0.1 # 步长时间
         self.waypoints = []
         self.current_wp_idx = 0
