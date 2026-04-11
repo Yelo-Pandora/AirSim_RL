@@ -236,48 +236,21 @@ class AirSimUAVEnv(gym.Env):
         
         # 将动作 (加速度) 转换为速度指令
         accel = action * 2.0 # 放大加速度范围
-<<<<<<< Updated upstream
         # 1. 运动控制：利用上一步缓存的速度进行矢量计算，避免多余的 API 请求
         # action 是 [-1, 1] 之间的 3 维向量
-        target_vel = self.last_velocity + (action * 2.0) * self.dt
+        target_vel = self.current_velocity + (action * 2.0) * self.dt
 
-        # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-        # curr_vel = state.kinematics_estimated.linear_velocity
-        # target_vel = airsim.Vector3r(
-        #     curr_vel.x_val + accel[0] * self.dt,
-        #     curr_vel.y_val + accel[1] * self.dt,
-        #     curr_vel.z_val + accel[2] * self.dt
-        # )
-=======
-        
-        # [优化] 从上一步保存的 state 提取数据，避免重复调用 getMultirotorState
-        # 这里需要注意，我们把获取状态的时机交给 _get_obs 统一处理，不再重复拉取。
-        # 这里用 self.current_velocity 替代重复调用。
-        curr_vel = self.current_velocity
-        target_vel = airsim.Vector3r(
-            curr_vel[0] + accel[0] * self.dt,
-            curr_vel[1] + accel[1] * self.dt,
-            curr_vel[2] + accel[2] * self.dt
-        )
->>>>>>> Stashed changes
-        
         # 限制最大速度 (保持在合理范围内)
         max_v = 10.0
-        # v_mag = np.linalg.norm([target_vel.x_val, target_vel.y_val, target_vel.z_val])
-        # if v_mag > max_v:
-        #     target_vel.x_val = (target_vel.x_val / v_mag) * max_v
-        #     target_vel.y_val = (target_vel.y_val / v_mag) * max_v
-        #     target_vel.z_val = (target_vel.z_val / v_mag) * max_v
-        # 限制最大速度 (向量化操作，避免繁琐的拆解)
         v_mag = np.linalg.norm(target_vel)
         if v_mag > max_v:
-            target_vel = (target_vel / v_mag) * 10.0
+            target_vel = (target_vel / v_mag) * max_v
 
         # 取消 join() 阻塞，直接发送指令。
         self.client.moveByVelocityAsync(
-            float(target_vel.x_val),
-            float(target_vel.y_val),
-            float(target_vel.z_val),
+            float(target_vel[0]),
+            float(target_vel[1]),
+            float(target_vel[2]),
             float(self.dt),
             vehicle_name=self.vehicle_name
         )
@@ -295,7 +268,6 @@ class AirSimUAVEnv(gym.Env):
         obs = self._get_obs()
         kin = obs["kinematics"]
         
-<<<<<<< Updated upstream
         # 获取无人机位置
         # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         # drone_pos = np.array([state.kinematics_estimated.position.x_val,
@@ -315,14 +287,6 @@ class AirSimUAVEnv(gym.Env):
         # 逆向推导无人机位置，省去 getMultirotorState 调用
         drone_pos = self.current_target - rel_pos
 
-=======
-        # [优化] 直接从刚刚 _get_obs 生成的 kin 中提取需要的信息，不再调用 getMultirotorState
-        drone_pos = kin[0:3] # 注意这里原来是 rel_pos，我们需要绝对坐标或者使用 rel_pos 倒推
-        # 修正：我们需要绝对坐标来判断航点，刚才在 _get_obs 中没有保存绝对坐标。
-        # 没关系，我们直接用 self.current_position，这是我在 _get_obs 中顺手存下来的（见下文修改）
-        drone_pos = self.current_position
-        
->>>>>>> Stashed changes
         # 检查航点经过逻辑
         passed_waypoint_id = 0
         is_first_arrival = False
