@@ -43,8 +43,12 @@ class AirSimUAVEnv(gym.Env):
         self.client.confirmConnection()         # 阻塞等待，直到连上虚幻引擎
         
         # 自动检测车辆名称，兼容不同的 settings.json 配置
-        vehicles = self.client.listVehicles()
-        self.vehicle_name = vehicles[0] if vehicles else ""
+        self.vehicle_name = "Drone1" # 默认值
+        try:
+            vehicles = self.client.listVehicles()
+            self.vehicle_name = vehicles[0] if vehicles else ""
+        except:
+            pass
         print(f"检测到无人机: '{self.vehicle_name}'")
 
         self.client.enableApiControl(True, vehicle_name=self.vehicle_name)      # 获取无人机的 API 控制权
@@ -125,7 +129,11 @@ class AirSimUAVEnv(gym.Env):
         - 前侧方 (0°-44°, 135°-179°): 每 3° 采样一次 (30个点)
         - 后方 (180°-359°): 每 6° 采样一次 (30个点)
         总计: 45 + 30 + 30 = 105 个点
+        
+        注意：此处的 LiDAR 配置为水平 360° 全景雷达 (-180° 到 180°)，
+        返回的 lidar_data 是经过 360 个角度 bin 聚合后的最小距离数组。
         """
+        # lidar_data 是 360 度的原始距离数据
         indices = []
         # 前方
         indices.extend(range(45, 135, 2))
@@ -156,6 +164,7 @@ class AirSimUAVEnv(gym.Env):
         # 3. 获取运动学状态
         state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         pos = state.kinematics_estimated.position
+        orient = state.kinematics_estimated.orientation
         vel = state.kinematics_estimated.linear_velocity
         acc_ang = state.kinematics_estimated.angular_acceleration
         
@@ -166,15 +175,42 @@ class AirSimUAVEnv(gym.Env):
         velocity = np.array([vel.x_val, vel.y_val, vel.z_val])
         angular_acc_mag = np.linalg.norm([acc_ang.x_val, acc_ang.y_val, acc_ang.z_val])
         
-        # 使用射线探测上下距离
-        # simTestLineOfSight 检查是否被遮挡，我们更想要距离。
-        # 这里改用 simGetRayLength 或者简单使用 lidar 数据中垂直分量
-        # 简化处理：假设环境高度限制，或者通过位置估算。
-        # 为了更准确，我们可以发送两条垂直的射线（如果 AirSim 支持）
-        # 实际上 AirSim 的 Lidar1 已经有 ±15 度的垂直 FOV，可以覆盖一部分。
-        # 这里暂且使用位置估算 (AirSim 中 Z 轴负向向上)
-        dis_z_bottom = float(abs(pos.z_val)) # 假设地面在 Z=0
-        dis_z_top = float(abs(-10.0 - pos.z_val)) # 假设天花板在 Z=-10
+        # 关于“简化太多”的问题，这里不再仅仅依赖位置估算。
+        # 而是直接从 105 维的 LiDAR 特征中提取周围的障碍物信息。
+        # 在下采样的 105 个点中：
+        # lidar[0:45] 是前方 (45°-134°)
+        # lidar[45:75] 是前侧方
+        # lidar[75:105] 是后方 (180°-359°)
+        # 这是一个 360° 水平全景雷达（Vertical FOV ±15°），
+        # 它的主要作用是避开四周墙壁，但无法直接测出正上方和正下方的垂直距离。
+        # 因此，要获取下方真实的障碍物距离（而非简单的对地高度），
+        # 我们通过向正下方发送一条射线 (Raycast) 来精确测量。
+        # 如果射线没有击中任何物体（或在设定范围 20 米外），则返回最大值 20.0。
+        try:
+            # 获取无人机当前的姿态 (Orientation)
+            # 在 AirSim 中，NED 坐标系下 Z 轴向下为正，
+            # 因此我们在局部坐标系下向正下方发射一条射线 (0, 0, 1)。
+            ray_length = 20.0
+            
+            # 使用 getMultirotorState 中的真实朝向，以保证无人机倾斜时射线也能垂直于无人机机腹
+            drone_pose = airsim.Pose(pos, orient) 
+            down_ray = self.client.simGetRayCastResult(
+                drone_pose, 
+                airsim.Vector3r(0, 0, 1), 
+                ray_length, 
+                vehicle_name=self.vehicle_name
+            )
+            dis_z_bottom = down_ray.distance if down_ray.has_hit else ray_length
+        except Exception:
+            # 如果接口调用失败，作为后备方案回退到对地绝对高度
+            dis_z_bottom = float(abs(pos.z_val))
+        
+        # 至于上方的距离，虽然是 3D 全景雷达（VerticalFOV 为 ±15°），
+        # 但它无法扫描到正上方（+90°）的天空区域。
+        # 由于是室外场景，实际上并没有“天花板”的物理阻挡，
+        # 但为了保证安全飞行空域和避免模型无限制地往高处飞（刷步数或逃避地面障碍），
+        # 我们在这里人为设定一个虚拟的“法定最高飞行高度”（比如 10 米）。
+        dis_z_top = float(abs(10.0 - abs(pos.z_val)))
 
         kin_data = np.array([
             rel_pos[0], rel_pos[1], rel_pos[2],
@@ -184,6 +220,10 @@ class AirSimUAVEnv(gym.Env):
             dis_z_bottom,
             dis_z_top
         ], dtype=np.float32)
+        
+        # 保存当前绝对坐标和速度供 step 方法使用，减少 API 调用
+        self.current_position = drone_pos
+        self.current_velocity = velocity
 
         return {
             "depth": self.downsample_depth(raw_depth).squeeze(0).cpu().numpy(),
@@ -195,8 +235,8 @@ class AirSimUAVEnv(gym.Env):
         self.step_count += 1
         
         # 将动作 (加速度) 转换为速度指令
-        # action 是 [-1, 1] 之间的 3 维向量
         accel = action * 2.0 # 放大加速度范围
+<<<<<<< Updated upstream
         # 1. 运动控制：利用上一步缓存的速度进行矢量计算，避免多余的 API 请求
         # action 是 [-1, 1] 之间的 3 维向量
         target_vel = self.last_velocity + (action * 2.0) * self.dt
@@ -208,6 +248,18 @@ class AirSimUAVEnv(gym.Env):
         #     curr_vel.y_val + accel[1] * self.dt,
         #     curr_vel.z_val + accel[2] * self.dt
         # )
+=======
+        
+        # [优化] 从上一步保存的 state 提取数据，避免重复调用 getMultirotorState
+        # 这里需要注意，我们把获取状态的时机交给 _get_obs 统一处理，不再重复拉取。
+        # 这里用 self.current_velocity 替代重复调用。
+        curr_vel = self.current_velocity
+        target_vel = airsim.Vector3r(
+            curr_vel[0] + accel[0] * self.dt,
+            curr_vel[1] + accel[1] * self.dt,
+            curr_vel[2] + accel[2] * self.dt
+        )
+>>>>>>> Stashed changes
         
         # 限制最大速度 (保持在合理范围内)
         max_v = 10.0
@@ -222,8 +274,6 @@ class AirSimUAVEnv(gym.Env):
             target_vel = (target_vel / v_mag) * 10.0
 
         # 取消 join() 阻塞，直接发送指令。
-        # join() 会等待动画/动作执行完（如果 dt 较长），
-        # 移除它可以让通信更紧凑，避免 "API call was not received" 的误报。
         self.client.moveByVelocityAsync(
             float(target_vel.x_val),
             float(target_vel.y_val),
@@ -241,9 +291,11 @@ class AirSimUAVEnv(gym.Env):
         # 手动进行短暂休眠来模拟步长间隔，这能让物理引擎运转且不会阻塞 API
         time.sleep(self.dt)
 
+        # [统一调用] 在动作执行完后，统一调用一次 _get_obs() 获取所有最新数据
         obs = self._get_obs()
         kin = obs["kinematics"]
         
+<<<<<<< Updated upstream
         # 获取无人机位置
         # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         # drone_pos = np.array([state.kinematics_estimated.position.x_val,
@@ -263,6 +315,14 @@ class AirSimUAVEnv(gym.Env):
         # 逆向推导无人机位置，省去 getMultirotorState 调用
         drone_pos = self.current_target - rel_pos
 
+=======
+        # [优化] 直接从刚刚 _get_obs 生成的 kin 中提取需要的信息，不再调用 getMultirotorState
+        drone_pos = kin[0:3] # 注意这里原来是 rel_pos，我们需要绝对坐标或者使用 rel_pos 倒推
+        # 修正：我们需要绝对坐标来判断航点，刚才在 _get_obs 中没有保存绝对坐标。
+        # 没关系，我们直接用 self.current_position，这是我在 _get_obs 中顺手存下来的（见下文修改）
+        drone_pos = self.current_position
+        
+>>>>>>> Stashed changes
         # 检查航点经过逻辑
         passed_waypoint_id = 0
         is_first_arrival = False
