@@ -174,42 +174,49 @@ class AirSimUAVEnv(gym.Env):
         velocity = np.array([vel.x_val, vel.y_val, vel.z_val])
         angular_acc_mag = np.linalg.norm([acc_ang.x_val, acc_ang.y_val, acc_ang.z_val])
         
-        # 关于“简化太多”的问题，这里不再仅仅依赖位置估算。
-        # 而是直接从 105 维的 LiDAR 特征中提取周围的障碍物信息。
+      
         # 在下采样的 105 个点中：
         # lidar[0:45] 是前方 (45°-134°)
         # lidar[45:75] 是前侧方
         # lidar[75:105] 是后方 (180°-359°)
         # 这是一个 360° 水平全景雷达（Vertical FOV ±15°），
         # 它的主要作用是避开四周墙壁，但无法直接测出正上方和正下方的垂直距离。
-        # 因此，要获取下方真实的障碍物距离（而非简单的对地高度），
-        # 我们通过向正下方发送一条射线 (Raycast) 来精确测量。
-        # 如果射线没有击中任何物体（或在设定范围 20 米外），则返回最大值 20.0。
-        try:
-            # 获取无人机当前的姿态 (Orientation)
-            # 在 AirSim 中，NED 坐标系下 Z 轴向下为正，
-            # 因此我们在局部坐标系下向正下方发射一条射线 (0, 0, 1)。
-            ray_length = 20.0
-            
-            # 使用 getMultirotorState 中的真实朝向，以保证无人机倾斜时射线也能垂直于无人机机腹
-            drone_pose = airsim.Pose(pos, orient) 
-            down_ray = self.client.simGetRayCastResult(
-                drone_pose, 
-                airsim.Vector3r(0, 0, 1), 
-                ray_length, 
-                vehicle_name=self.vehicle_name
-            )
-            dis_z_bottom = down_ray.distance if down_ray.has_hit else ray_length
-        except Exception:
-            # 如果接口调用失败，作为后备方案回退到对地绝对高度
-            dis_z_bottom = float(abs(pos.z_val))
         
-        # 至于上方的距离，虽然是 3D 全景雷达（VerticalFOV 为 ±15°），
-        # 但它无法扫描到正上方（+90°）的天空区域。
-        # 由于是室外场景，实际上并没有“天花板”的物理阻挡，
-        # 但为了保证安全飞行空域和避免模型无限制地往高处飞（刷步数或逃避地面障碍），
-        # 我们在这里人为设定一个虚拟的“法定最高飞行高度”（比如 10 米）。
-        dis_z_top = float(abs(10.0 - abs(pos.z_val)))
+        
+        try:
+            # 优先尝试获取底部距离传感器数据 (名称需与 settings.json 对应)
+            bottom_sensor = self.client.getDistanceSensorData(distance_sensor_name="DistanceBottom", vehicle_name=self.vehicle_name)
+            dis_z_bottom = bottom_sensor.distance
+        except Exception:
+            try:
+                # 获取无人机当前的姿态 (Orientation)
+                # 在 AirSim 中，NED 坐标系下 Z 轴向下为正，
+                # 因此我们在局部坐标系下向正下方发射一条射线 (0, 0, 1)。
+                ray_length = 20.0
+                
+                # 使用 getMultirotorState 中的真实朝向，以保证无人机倾斜时射线也能垂直于无人机机腹
+                drone_pose = airsim.Pose(pos, orient) 
+                down_ray = self.client.simGetRayCastResult(
+                    drone_pose, 
+                    airsim.Vector3r(0, 0, 1), 
+                    ray_length, 
+                    vehicle_name=self.vehicle_name
+                )
+                dis_z_bottom = down_ray.distance if down_ray.has_hit else ray_length
+            except Exception:
+                # 如果所有接口调用失败，作为后备方案回退到对地绝对高度
+                dis_z_bottom = float(abs(pos.z_val))
+        
+        # 至于上方的距离，同样优先尝试顶部距离传感器
+        try:
+            top_sensor = self.client.getDistanceSensorData(distance_sensor_name="DistanceTop", vehicle_name=self.vehicle_name)
+            dis_z_top = top_sensor.distance
+        except Exception:
+            # 虽然是 3D 全景雷达（VerticalFOV 为 ±15°），但它无法扫描到正上方（+90°）的天空区域。
+            # 由于是室外场景，实际上并没有“天花板”的物理阻挡，
+            # 但为了保证安全飞行空域和避免模型无限制地往高处飞（刷步数或逃避地面障碍），
+            # 我们在这里人为设定一个虚拟的“法定最高飞行高度”（比如 10 米）。
+            dis_z_top = float(abs(10.0 - abs(pos.z_val)))
 
         kin_data = np.array([
             rel_pos[0], rel_pos[1], rel_pos[2],

@@ -895,7 +895,6 @@ class VehicleClient:
         Args:
             distance_sensor_name (str, optional): Name of Distance Sensor to get data from, specified in settings.json
             vehicle_name (str, optional): Name of vehicle to which the sensor corresponds to
-
         Returns:
             DistanceSensorData:
         """

@@ -23,6 +23,24 @@
       "VehicleType": "SimpleFlight",
       "AutoCreate": true,
       "Sensors": {
+        "DistanceBottom": {
+          "SensorType": 5,
+          "Enabled": true,
+          "MinDistance": 0.2,
+          "MaxDistance": 40,
+          "X": 0, "Y": 0, "Z": 0,
+          "Yaw": 0, "Pitch": -90, "Roll": 0,
+          "DrawDebugPoints": true
+        },
+        "DistanceTop": {
+          "SensorType": 5,
+          "Enabled": true,
+          "MinDistance": 0.2,
+          "MaxDistance": 40,
+          "X": 0, "Y": 0, "Z": -0.5,
+          "Yaw": 0, "Pitch": 90, "Roll": 0,
+          "DrawDebugPoints": true
+        },
         "Lidar1": {
           "SensorType": 6,
           "Enabled": true,

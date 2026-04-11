@@ -534,6 +534,25 @@ class DistanceSensorData(MsgpackMixin):
     max_distance = 0.0
     relative_pose = Pose()
 
+    @classmethod
+    def from_msgpack(cls, encoded):
+        obj = cls()
+        if isinstance(encoded, list):
+            obj.time_stamp = encoded[0] if len(encoded) > 0 else 0
+            obj.distance = encoded[1] if len(encoded) > 1 else 0.0
+            obj.min_distance = encoded[2] if len(encoded) > 2 else 0.0
+            obj.max_distance = encoded[3] if len(encoded) > 3 else 0.0
+            obj.relative_pose = Pose.from_msgpack(encoded[4]) if len(encoded) > 4 else Pose()
+        elif isinstance(encoded, dict):
+            obj.time_stamp = encoded.get(b'time_stamp', encoded.get('time_stamp', 0))
+            obj.distance = encoded.get(b'distance', encoded.get('distance', 0.0))
+            obj.min_distance = encoded.get(b'min_distance', encoded.get('min_distance', 0.0))
+            obj.max_distance = encoded.get(b'max_distance', encoded.get('max_distance', 0.0))
+            pose_data = encoded.get(b'relative_pose', encoded.get('relative_pose', None))
+            if pose_data is not None:
+                obj.relative_pose = Pose.from_msgpack(pose_data)
+        return obj
+
 class Box2D(MsgpackMixin):
     min = Vector2r()
     max = Vector2r()
