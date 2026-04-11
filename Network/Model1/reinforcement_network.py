@@ -197,22 +197,29 @@ class AirSimUAVEnv(gym.Env):
         # 将动作 (加速度) 转换为速度指令
         # action 是 [-1, 1] 之间的 3 维向量
         accel = action * 2.0 # 放大加速度范围
-        
-        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-        curr_vel = state.kinematics_estimated.linear_velocity
-        target_vel = airsim.Vector3r(
-            curr_vel.x_val + accel[0] * self.dt,
-            curr_vel.y_val + accel[1] * self.dt,
-            curr_vel.z_val + accel[2] * self.dt
-        )
+        # 1. 运动控制：利用上一步缓存的速度进行矢量计算，避免多余的 API 请求
+        # action 是 [-1, 1] 之间的 3 维向量
+        target_vel = self.last_velocity + (action * 2.0) * self.dt
+
+        # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        # curr_vel = state.kinematics_estimated.linear_velocity
+        # target_vel = airsim.Vector3r(
+        #     curr_vel.x_val + accel[0] * self.dt,
+        #     curr_vel.y_val + accel[1] * self.dt,
+        #     curr_vel.z_val + accel[2] * self.dt
+        # )
         
         # 限制最大速度 (保持在合理范围内)
         max_v = 10.0
-        v_mag = np.linalg.norm([target_vel.x_val, target_vel.y_val, target_vel.z_val])
+        # v_mag = np.linalg.norm([target_vel.x_val, target_vel.y_val, target_vel.z_val])
+        # if v_mag > max_v:
+        #     target_vel.x_val = (target_vel.x_val / v_mag) * max_v
+        #     target_vel.y_val = (target_vel.y_val / v_mag) * max_v
+        #     target_vel.z_val = (target_vel.z_val / v_mag) * max_v
+        # 限制最大速度 (向量化操作，避免繁琐的拆解)
+        v_mag = np.linalg.norm(target_vel)
         if v_mag > max_v:
-            target_vel.x_val = (target_vel.x_val / v_mag) * max_v
-            target_vel.y_val = (target_vel.y_val / v_mag) * max_v
-            target_vel.z_val = (target_vel.z_val / v_mag) * max_v
+            target_vel = (target_vel / v_mag) * 10.0
 
         # 取消 join() 阻塞，直接发送指令。
         # join() 会等待动画/动作执行完（如果 dt 较长），
@@ -238,11 +245,24 @@ class AirSimUAVEnv(gym.Env):
         kin = obs["kinematics"]
         
         # 获取无人机位置
-        state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-        drone_pos = np.array([state.kinematics_estimated.position.x_val, 
-                              state.kinematics_estimated.position.y_val, 
-                              state.kinematics_estimated.position.z_val])
-        
+        # state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        # drone_pos = np.array([state.kinematics_estimated.position.x_val,
+        #                       state.kinematics_estimated.position.y_val,
+        #                       state.kinematics_estimated.position.z_val])
+        # 从 kinematics 向量中提取数据
+        rel_pos = kin[0:3]
+        dis2goal = kin[3]
+        velocity = kin[4:7]
+        angular_acc = kin[7]
+        dis_z_bottom = kin[8]
+        dis_z_top = kin[9]
+
+        # 缓存当前速度供下一步使用
+        self.last_velocity = velocity
+        # 在 _get_obs() 中: rel_pos = target - drone_pos
+        # 逆向推导无人机位置，省去 getMultirotorState 调用
+        drone_pos = self.current_target - rel_pos
+
         # 检查航点经过逻辑
         passed_waypoint_id = 0
         is_first_arrival = False
@@ -259,12 +279,6 @@ class AirSimUAVEnv(gym.Env):
                         self.passed_waypoints_mask[j] = True
                     break
 
-        rel_pos = kin[0:3]
-        dis2goal = kin[3]
-        velocity = kin[4:7]
-        angular_acc = kin[7]
-        dis_z_bottom = kin[8]
-        dis_z_top = kin[9]
         v_magnitude = float(np.linalg.norm(velocity))
         
         if dis2goal > 1e-5 and v_magnitude > 1e-5:
