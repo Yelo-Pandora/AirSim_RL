@@ -1,4 +1,7 @@
 import torch
+import json
+import random
+import os
 import torch.nn.functional as F
 import gymnasium as gym
 import numpy as np
@@ -27,6 +30,17 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
 class AirSimUAVEnv(gym.Env):
     def __init__(self):
         super().__init__()
+
+        # 加载位置对数据
+        self.positions_file = "target.json" # 到时候根据情况
+        if os.path.exists(self.positions_file):
+            with open(self.positions_file, 'r') as f:
+                self.position_pairs = json.load(f)
+            print(f"成功加载 {len(self.position_pairs)} 组起点-终点位置对")
+        else:
+            # 如果文件不存在，使用默认值
+            self.position_pairs = [{"start": [0.0, 0.0, -2.0], "target": [20.0, 0.0, -2.0]}]
+            print("警告：未找到 positions.json，使用默认位置。")
 
         # 动作空间: 3维连续加速度
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
@@ -354,10 +368,15 @@ class AirSimUAVEnv(gym.Env):
         super().reset(seed=seed)
         self.step_count = 0
 
+        # 如果 options 中没有指定具体的 start/target，则从列表中随机选一组
         options = options or {}
-        # 默认起点和终点，如果在 options 中没提供
-        start_pos = options.get("start_pos", [0.0, 0.0, -2.0])
-        target_pos = options.get("target", [20.0, 0.0, -2.0])
+        if "start_pos" in options and "target" in options:
+            start_pos = options["start_pos"]
+            target_pos = options["target"]
+        else:
+            selected_pair = random.choice(self.position_pairs)
+            start_pos = selected_pair["start"]
+            target_pos = selected_pair["target"]
         
         self.current_start_pos = np.array(start_pos, dtype=np.float32)
         self.current_target = np.array(target_pos, dtype=np.float32)
