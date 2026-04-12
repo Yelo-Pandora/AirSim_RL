@@ -62,7 +62,7 @@ def main():
         policy_kwargs = policy_kwargs,      # 注入自定义的网络特征提取器
         tensorboard_log = "./tb_logs/",     # TensorBoard 日志保存路径
         device = device,  # 使用 cuda
-        verbose = 1  # 打印详细输出
+        verbose = 0  # 打印详细输出
     )
 
     # 开始训练

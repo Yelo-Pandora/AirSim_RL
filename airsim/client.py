@@ -1571,7 +1571,16 @@ class MultirotorClient(VehicleClient, object):
         Returns:
             MultirotorState:
         """
-        return MultirotorState.from_msgpack(self.client.call('getMultirotorState', vehicle_name))
+        state = MultirotorState.from_msgpack(self.client.call('getMultirotorState', vehicle_name))
+
+        # 2. 直接调用底层的真实物理运动学状态 (绕过飞控估算器)
+        gt_kinematics = self.simGetGroundTruthKinematics(vehicle_name)
+
+        # 3. 移花接木：用真实的物理状态强行覆盖掉原有的估算状态
+        state.kinematics_estimated = gt_kinematics
+
+        return state
+
     getMultirotorState.__annotations__ = {'return': MultirotorState}
 #query rotor states
     def getRotorStates(self, vehicle_name = ''):
