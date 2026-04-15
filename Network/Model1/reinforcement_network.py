@@ -93,7 +93,7 @@ class AirSimUAVEnv(gym.Env):
 
 
         self.step_count = 0                                                         # 统计当前回合走过的步数
-        self.max_steps = 300                                                        # 允许的最大步数
+        self.max_steps = 150                                                        # 允许的最大步数
         self.current_target = np.array([20.0, 0.0, -2.0], dtype=np.float32)   # 默认目标
         self.current_start_pos = np.array([0.0, 0.0, -2.0], dtype=np.float32) # 默认起点
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
@@ -261,7 +261,7 @@ class AirSimUAVEnv(gym.Env):
 
         # 运动控制：利用上一步缓存的速度进行矢量计算，该公式中的 current_velocity 其实是上一步的速度
         # action 是 [-1, 1] 之间的 3 维向量
-        target_vel = self.current_velocity + (action * 5.0) * self.dt
+        target_vel = self.current_velocity + (action * 1.0) * self.dt
         # 限制最大速度 (保持在合理范围内)
         max_v = 10.0
         # 计算当前步的速度
@@ -270,55 +270,58 @@ class AirSimUAVEnv(gym.Env):
         if v_mag > max_v:
             target_vel = (target_vel / v_mag) * max_v
 
-        # 2. 核心修复：计算期望的偏航角 (Yaw)，让机头指向速度方向
-        # 只要水平速度不为 0，就计算偏航角
-        if np.linalg.norm([target_vel[0], target_vel[1]]) > 0.1:
-            # np.arctan2(y, x) 返回的是弧度
-            target_yaw_rad = math.atan2(target_vel[1], target_vel[0])
-            target_yaw_deg = math.degrees(target_yaw_rad)
-        else:
-            # 如果速度很小（悬停），保持当前朝向
-            state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-            _, _, target_yaw_rad = airsim.to_eularian_angles(state.kinematics_estimated.orientation)
-            target_yaw_deg = math.degrees(target_yaw_rad)
 
-        # 3. 使用带有 YawMode 的 API 发送指令
-        # is_rate=False 表示 target_yaw_deg 是绝对角度，不是角速度
-        yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=target_yaw_deg)
+        # # 2. 核心修复：计算期望的偏航角 (Yaw)，让机头指向速度方向
+        # # 只要水平速度不为 0，就计算偏航角
+        # if np.linalg.norm([target_vel[0], target_vel[1]]) > 0.1:
+        #     # np.arctan2(y, x) 返回的是弧度
+        #     target_yaw_rad = math.atan2(target_vel[1], target_vel[0])
+        #     target_yaw_deg = math.degrees(target_yaw_rad)
+        # else:
+        #     # 如果速度很小（悬停），保持当前朝向
+        #     state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+        #     _, _, target_yaw_rad = airsim.to_eularian_angles(state.kinematics_estimated.orientation)
+        #     target_yaw_deg = math.degrees(target_yaw_rad)
+        #
+        # # 3. 使用带有 YawMode 的 API 发送指令
+        # # is_rate=False 表示 target_yaw_deg 是绝对角度，不是角速度
+        # yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=target_yaw_deg)
+        #
+        # self.client.moveByVelocityAsync(
+        #     float(target_vel[0]),
+        #     float(target_vel[1]),
+        #     float(target_vel[2]),
+        #     float(self.dt)*1.1,
+        #     drivetrain=airsim.DrivetrainType.ForwardOnly,  # 强制机头朝向运动方向
+        #     yaw_mode=yaw_mode,
+        #     vehicle_name=self.vehicle_name
+        # )
+        #
+        #
+        # try:
+        #     self.client.ping()
+        # except:
+        #     pass
+        #
+        # time.sleep(self.dt)
 
+
+        # 取消 join() 阻塞，直接发送指令。
         self.client.moveByVelocityAsync(
             float(target_vel[0]),
             float(target_vel[1]),
             float(target_vel[2]),
             float(self.dt),
-            drivetrain=airsim.DrivetrainType.ForwardOnly,  # 强制机头朝向运动方向
-            yaw_mode=yaw_mode,
             vehicle_name=self.vehicle_name
         )
 
+        # 强制补充发送一个 ping 或者心跳包，告诉 AirSim 我们还在，不要进入安全悬停模式
         try:
             self.client.ping()
         except:
             pass
-
+        # 手动进行短暂休眠来模拟步长间隔，这能让物理引擎运转且不会阻塞 API
         time.sleep(self.dt)
-
-        # # 取消 join() 阻塞，直接发送指令。
-        # self.client.moveByVelocityAsync(
-        #     float(target_vel[0]),
-        #     float(target_vel[1]),
-        #     float(target_vel[2]),
-        #     float(self.dt),
-        #     vehicle_name=self.vehicle_name
-        # )
-        #
-        # # 强制补充发送一个 ping 或者心跳包，告诉 AirSim 我们还在，不要进入安全悬停模式
-        # try:
-        #     self.client.ping()
-        # except:
-        #     pass
-        # # 手动进行短暂休眠来模拟步长间隔，这能让物理引擎运转且不会阻塞 API
-        # time.sleep(self.dt)
         # [统一调用] 在动作执行完后，统一调用一次 _get_obs() 获取所有最新数据
         obs = self._get_obs()
         kin = obs["kinematics"]
@@ -331,6 +334,8 @@ class AirSimUAVEnv(gym.Env):
         angular_acc = kin[7]
         dis_z_bottom = kin[8]
         dis_z_top = kin[9]
+        progress = self.last_dis2goal - dis2goal
+        self.last_dis2goal = dis2goal  # 更新记忆
         # 在 _get_obs() 中: rel_pos = target - drone_pos
         # 逆向推导无人机位置，省去 getMultirotorState 调用
         drone_pos = self.current_target - rel_pos
@@ -362,12 +367,12 @@ class AirSimUAVEnv(gym.Env):
         # 是否到达终点位置
         arrived = bool(dis2goal < 1.5)
 
-        # if self.start_dist > 1e-5:
-        #     cross_product = np.cross(rel_pos, self.start_rel_pos)
-        #     perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
-        #     crossed_border = bool(perpendicular_dist > 7.0)
-        # else:
-        #     crossed_border = False
+        if self.start_dist > 1e-5:
+            cross_product = np.cross(rel_pos, self.start_rel_pos)
+            perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
+            crossed_border = bool(perpendicular_dist > 7.0)
+        else:
+            crossed_border = False
         # 添加一个飞行限高，当无人机飞出指定高度直接结束回合
         out_of_ceiling = bool(drone_pos[2] < -50.0)
         # 是否发生碰撞
@@ -376,11 +381,12 @@ class AirSimUAVEnv(gym.Env):
         info = {
             'collision': collision_info.has_collided,
             'arrived': arrived,
-            # 'crossed_border': crossed_border,
+            'crossed_border': crossed_border,
             'out_of_ceiling': out_of_ceiling,
             'passed_waypoint': passed_waypoint_id,
             'is_first_arrival': is_first_arrival,
             'dis2goal': dis2goal,
+            'progress': progress,  # 将进度传给 reward 计算函数
             'angle_to_target': angle_to_target,
             'dis_z_bottom': dis_z_bottom,
             'dis_z_top': dis_z_top,
@@ -389,7 +395,7 @@ class AirSimUAVEnv(gym.Env):
         }
         # 收尾部分
         reward = self._calculate_reward(info)
-        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling']
+        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
         self._render_dashboard(action, drone_pos, velocity, reward, terminated, truncated, info)
 
@@ -422,9 +428,17 @@ class AirSimUAVEnv(gym.Env):
         # 当设置为 -2.0 时，指的是“相对于出生点向上 2 米”
         start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10.0
         self.current_start_pos[2] = start_z
+        # 计算起点到终点的二维方向，获取初始偏航角(Yaw)
+        direction = self.current_target - self.current_start_pos
+        if np.linalg.norm([direction[0], direction[1]]) > 1e-5:
+            initial_yaw_rad = math.atan2(direction[1], direction[0])
+        else:
+            initial_yaw_rad = 0.0
+        # 记录初始的偏航角（角度制），供 step() 方法锁定朝向使用
+        self.init_yaw_deg = math.degrees(initial_yaw_rad)
         pose = airsim.Pose(
             airsim.Vector3r(float(start_pos[0]), float(start_pos[1]), start_z),
-            airsim.Quaternionr(0, 0, 0, 1)
+            airsim.to_quaternion(0.0, 0.0, initial_yaw_rad),
         )
         # 注意：必须调用 simSetVehiclePose，并等待它生效
         self.client.simSetVehiclePose(pose, True, vehicle_name=self.vehicle_name)
@@ -474,12 +488,13 @@ class AirSimUAVEnv(gym.Env):
 
         if self.start_dist < 1e-5:
             self.start_dist = 1.0
+        self.last_dis2goal = self.start_dist  # 记录初始距离
 
         return obs, {'start': self.current_start_pos, 'target': self.current_target}
 
     def _calculate_reward(self, info):
         """按照论文公式 (2)-(14) 实现"""
-
+        r_progress = 15.0 * info.get('progress', 0.0)
         # R_path (公式 8)
         # 接近程度奖励
         r_proximity = 40 * (info.get('passed_waypoint', 0) / 15) if info.get('is_first_arrival', False) else 0
@@ -505,9 +520,8 @@ class AirSimUAVEnv(gym.Env):
         else:
             r_direction = -0.5 * (a_abs / 180.0)
         # border奖励
-        # r_border = -400 if info['crossed_border'] else 0
-        # r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border
-        r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive
+        r_border = -400 if info['crossed_border'] else 0
+        r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border
         # R_collision (公式 11)
         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
         dis_z_bottom = info['dis_z_bottom']  # 离地面障碍物距离
@@ -547,14 +561,16 @@ class AirSimUAVEnv(gym.Env):
             r_vel = 0
         r_stabilization = r_ang + r_vel
 
-        return r_path + r_collision + r_stabilization
+        r_survival = 0.5 if not (info['collision'] or info.get('out_of_ceiling', False)) else 0.0
+
+        return r_path + r_collision + r_stabilization +r_survival
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """
         在终端实时格式化输出无人机飞行状态仪表盘
         """
         # 实际使用的加速度 (对应 target_vel 的更新)
-        actual_acc = action * 2.0
+        actual_acc = action * 1.0
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
         print(f"\r[Step {self.step_count:4d}] "
