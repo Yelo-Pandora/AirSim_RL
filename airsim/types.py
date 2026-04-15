@@ -80,11 +80,12 @@ class MsgpackMixin:
                 obj.position = Vector3r.from_msgpack(pos)
             elif cls == LidarData:
                 # 兼容不同长度的返回值，确保 point_cloud 是列表或数组
-                obj.point_cloud = encoded[0] if len(encoded) > 0 and isinstance(encoded[0], (list, tuple, bytes, bytearray)) else []
-                obj.time_stamp = encoded[1] if len(encoded) > 1 else 0
+                # C++ LidarData struct: uint64_t time_stamp, vector<real_T> point_cloud, Pose pose, vector<int32_t> segmentation
+                obj.time_stamp = encoded[0] if len(encoded) > 0 else 0
+                obj.point_cloud = encoded[1] if len(encoded) > 1 and isinstance(encoded[1], (list, tuple, bytes, bytearray)) else []
                 if len(encoded) > 2 and encoded[2] is not None:
                     obj.pose = Pose.from_msgpack(encoded[2])
-                obj.segmentation = encoded[3] if len(encoded) > 3 else 0
+                obj.segmentation = encoded[3] if len(encoded) > 3 else []
         elif isinstance(encoded, dict):
             # 原有的字典处理逻辑
             obj.__dict__ = { k : (v if not isinstance(v, dict) else getattr(getattr(obj, k).__class__, "from_msgpack")(v)) for k, v in encoded.items()}
