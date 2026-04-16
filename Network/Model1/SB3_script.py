@@ -67,7 +67,7 @@ def main():
 
     # 开始训练
     print("Starting training...")
-    total_timesteps = 1500000  # 设置训练的总步数
+    total_timesteps = 15000  # 设置训练的总步数
     model.learn(
         total_timesteps=total_timesteps,
         tb_log_name="TD3_AirSim_Run1",  # TensorBoard 中显示的实验名称
