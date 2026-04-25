@@ -3,15 +3,21 @@ import math
 import csv
 import random
 import os
-import torch.nn.functional as F
 import gymnasium as gym
 import numpy as np
 import airsim
 import time
-import cv2
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from deep_network import LDTED3FeatureExtractor
+from preprocessing_utils import (
+    decode_depth_planar,
+    resize_depth_for_ldtd3,
+    downsample_depth_minpool,
+    lidar_points_to_360,
+    downsample_lidar_105,
+    action_to_target_velocity,
+)
 
 # 基于特征提取的网络自定义 SB3 要用到的特征提取器
 class CustomCombinedExtractor(BaseFeaturesExtractor):
@@ -109,10 +115,7 @@ class AirSimUAVEnv(gym.Env):
         """
         根据论文公式(1)，对 144x256 的深度图进行 16x16 的下采样，取最小值。
         """
-        # 使用 PyTorch 的 max_pool2d 实现 min_pooling (取负数再取最大)
-        depth_tensor = torch.from_numpy(depth_img).unsqueeze(0).unsqueeze(0).float()
-        downsampled = -F.max_pool2d(-depth_tensor, kernel_size=16, stride=16)
-        return downsampled  # 输出尺寸 [1, 1, 9, 16]
+        return downsample_depth_minpool(depth_img)
 
 
     # 激光雷达数据获取与处理
@@ -132,23 +135,9 @@ class AirSimUAVEnv(gym.Env):
 
         if lidar_data is None or len(lidar_data.point_cloud) < 3:
             # 如果依然失败或点云为空，返回默认的最大距离 (例如 20.0)
-            return np.ones(360) * 20.0
+            return np.ones(360, dtype=np.float32) * 20.0
 
-        # 将点云转换为距离数据 (极坐标)
-        points = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
-        # 计算每个点到无人机的距离
-        dists = np.linalg.norm(points, axis=1)
-        # 计算每个点的水平角度 (0-360)
-        angles = np.arctan2(points[:, 1], points[:, 0]) * 180 / np.pi
-        angles = (angles + 90) % 360
-
-        # 简单处理：将360度划分为360个bin，取每个bin内的最小值
-        lidar_360 = np.ones(360) * 20.0 # 默认最大距离20m
-        for i in range(len(dists)):
-            angle_idx = int(angles[i]) % 360
-            if dists[i] < lidar_360[angle_idx]:
-                lidar_360[angle_idx] = dists[i]
-        return lidar_360
+        return lidar_points_to_360(lidar_data.point_cloud)
 
 
     # 激光雷达下采样函数
@@ -163,18 +152,7 @@ class AirSimUAVEnv(gym.Env):
         注意：此处的 LiDAR 配置为水平 360° 全景雷达 (-180° 到 180°)，
         返回的 lidar_data 是经过 360 个角度 bin 聚合后的最小距离数组。
         """
-        # lidar_data 是 360 度的原始距离数据
-        indices = []
-        # 前方
-        indices.extend(range(45, 135, 2))
-        # 前侧方
-        indices.extend(range(0, 45, 3))
-        indices.extend(range(135, 180, 3))
-        # 后方
-        indices.extend(range(180, 360, 6))
-
-        downsampled = lidar_data[indices]
-        return torch.from_numpy(downsampled).float()
+        return downsample_lidar_105(lidar_data)
 
 
     # 获取环境需要的信息的函数，包括状态向量和一些判别信息
@@ -186,12 +164,12 @@ class AirSimUAVEnv(gym.Env):
         ], vehicle_name=self.vehicle_name)
         # 成功获取到深度图
         if responses and responses[0].width > 0:
-            raw_depth = np.array(responses[0].image_data_float).reshape(responses[0].height, responses[0].width)
+            raw_depth = decode_depth_planar(responses[0])
             # 将获取到的深度图通过下采样变维到 256*144 大小
-            raw_depth = cv2.resize(raw_depth, (256, 144))
+            raw_depth = resize_depth_for_ldtd3(raw_depth)
         # 没获取到深度图，基于一个默认值
         else:
-            raw_depth = np.ones((144, 256)) * 20.0
+            raw_depth = np.ones((144, 256), dtype=np.float32) * 20.0
 
 
         # 获取激光雷达数据
@@ -261,14 +239,7 @@ class AirSimUAVEnv(gym.Env):
 
         # 运动控制：利用上一步缓存的速度进行矢量计算，该公式中的 current_velocity 其实是上一步的速度
         # action 是 [-1, 1] 之间的 3 维向量
-        target_vel = self.current_velocity + (action * 1.0) * self.dt
-        # 限制最大速度 (保持在合理范围内)
-        max_v = 10.0
-        # 计算当前步的速度
-        v_mag = np.linalg.norm(target_vel)
-        # 如果速度过大，则裁剪速度
-        if v_mag > max_v:
-            target_vel = (target_vel / v_mag) * max_v
+        target_vel = action_to_target_velocity(self.current_velocity, action, dt=self.dt, max_v=10.0)
 
 
         # # 2. 核心修复：计算期望的偏航角 (Yaw)，让机头指向速度方向
