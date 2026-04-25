@@ -5,8 +5,6 @@ import cv2
 
 
 LIDAR_EMPTY_VALUE = 20.0
-DEPTH_MAX_VALUE = 50.0
-DEPTH_INVALID_EPS = 1e-3
 LIDAR_FRONT_INDICES = list(range(45, 135, 2))
 LIDAR_SIDE_LEFT_INDICES = list(range(0, 45, 3))
 LIDAR_SIDE_RIGHT_INDICES = list(range(135, 180, 3))
@@ -26,19 +24,11 @@ def decode_depth_planar(response):
         raise ValueError(
             f"Depth 数据长度不匹配: got={depth_arr.size}, expected={expected_size}"
         )
-    depth_img = depth_arr.reshape(response.height, response.width)
-    depth_img = np.nan_to_num(depth_img, nan=DEPTH_MAX_VALUE, posinf=DEPTH_MAX_VALUE, neginf=DEPTH_MAX_VALUE)
-    depth_img[depth_img <= DEPTH_INVALID_EPS] = DEPTH_MAX_VALUE
-    depth_img = np.clip(depth_img, 0.0, DEPTH_MAX_VALUE)
-    return depth_img
+    return depth_arr.reshape(response.height, response.width)
 
 
 def resize_depth_for_ldtd3(depth_img):
-    resized = cv2.resize(depth_img, (256, 144), interpolation=cv2.INTER_AREA)
-    resized = np.nan_to_num(resized, nan=DEPTH_MAX_VALUE, posinf=DEPTH_MAX_VALUE, neginf=DEPTH_MAX_VALUE)
-    resized[resized <= DEPTH_INVALID_EPS] = DEPTH_MAX_VALUE
-    resized = np.clip(resized, 0.0, DEPTH_MAX_VALUE)
-    return resized
+    return cv2.resize(depth_img, (256, 144), interpolation=cv2.INTER_AREA)
 
 
 def downsample_depth_minpool(depth_img_256x144):

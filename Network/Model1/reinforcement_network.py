@@ -169,7 +169,7 @@ class AirSimUAVEnv(gym.Env):
             raw_depth = resize_depth_for_ldtd3(raw_depth)
         # 没获取到深度图，基于一个默认值
         else:
-            raw_depth = np.ones((144, 256), dtype=np.float32) * 50.0
+            raw_depth = np.ones((144, 256), dtype=np.float32) * 20.0
 
 
         # 获取激光雷达数据
