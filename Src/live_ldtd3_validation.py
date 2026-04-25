@@ -19,10 +19,11 @@ from preprocessing_utils import (
     LIDAR_SIDE_RIGHT_INDICES,
     LIDAR_REAR_INDICES,
     LIDAR_105_INDICES,
-    action_to_target_velocity,
+    action_to_acceleration,
     decode_depth_planar,
     downsample_depth_minpool,
     downsample_lidar_105,
+    integrate_velocity_with_acceleration,
     lidar_points_to_360,
     resize_depth_for_ldtd3,
 )
@@ -32,11 +33,18 @@ MAX_DISPLAY_RANGE = 20.0
 WINDOW_NAME = "LD-TD3 Live Validation"
 DEFAULT_START = np.array([0.0, 0.0, -2.0], dtype=np.float32)
 DEFAULT_TARGET = np.array([20.0, 0.0, -2.0], dtype=np.float32)
+CONTROL_DT = 0.5
+ACCEL_SCALE = 2.0
 
 IMAGE_TYPE_NAMES = {
     int(airsim.ImageType.Scene): "Scene",
     int(airsim.ImageType.DepthPlanar): "DepthPlanar",
 }
+
+
+def wrap_angle_deg(angle_deg):
+    return ((angle_deg + 180.0) % 360.0) - 180.0
+
 
 ACTION_PROBES = [
     ("+X", np.array([1.0, 0.0, 0.0], dtype=np.float32)),
@@ -45,8 +53,9 @@ ACTION_PROBES = [
     ("-Y", np.array([0.0, -1.0, 0.0], dtype=np.float32)),
     ("+Z", np.array([0.0, 0.0, 1.0], dtype=np.float32)),
     ("-Z", np.array([0.0, 0.0, -1.0], dtype=np.float32)),
+    ("hover", np.array([0.0, 0.0, 0.0], dtype=np.float32)),
+    ("small+X", np.array([0.15, 0.0, 0.0], dtype=np.float32)),
 ]
-
 
 def decode_scene_png(response):
     img_1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
@@ -104,8 +113,23 @@ def get_state(client, vehicle_name):
         "pos": pos,
         "vel": vel,
         "ang_acc": acc_ang,
-        "yaw_deg": yaw,
+        "ang_acc_mag": float(np.linalg.norm(acc_ang)),
+        "yaw_deg": wrap_angle_deg(yaw),
     }
+
+
+def get_soft_alignment_yaw(target_vel, current_yaw_deg, last_commanded_yaw_deg, speed_on=0.2, speed_off=0.1, max_step_deg=20.0):
+    speed_xy = float(np.linalg.norm(target_vel[:2]))
+    commanded_yaw = float(last_commanded_yaw_deg)
+    if speed_xy >= speed_on:
+        desired_yaw_deg = math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0])))
+    elif speed_xy <= speed_off:
+        desired_yaw_deg = commanded_yaw
+    else:
+        desired_yaw_deg = commanded_yaw
+    yaw_delta = wrap_angle_deg(desired_yaw_deg - float(current_yaw_deg))
+    yaw_delta = float(np.clip(yaw_delta, -max_step_deg, max_step_deg))
+    return wrap_angle_deg(float(current_yaw_deg) + yaw_delta)
 
 
 def set_pose_and_hover(client, vehicle_name, start_pos=DEFAULT_START, target=DEFAULT_TARGET):
@@ -381,27 +405,70 @@ def run_action_probe(client, vehicle_name, action, yaw_override_deg=None):
         client.rotateToYawAsync(yaw_override_deg, vehicle_name=vehicle_name).join()
         time.sleep(0.6)
     before = get_state(client, vehicle_name)
-    target_vel = action_to_target_velocity(before["vel"], action, dt=0.5, max_v=10.0)
-    client.moveByVelocityAsync(float(target_vel[0]), float(target_vel[1]), float(target_vel[2]), 0.5, vehicle_name=vehicle_name)
-    time.sleep(0.65)
+    commanded_accel = action_to_acceleration(action, accel_scale=ACCEL_SCALE)
+    target_vel = integrate_velocity_with_acceleration(before["vel"], commanded_accel, dt=CONTROL_DT, max_v=10.0)
+    commanded_yaw_deg = get_soft_alignment_yaw(target_vel, before["yaw_deg"], before["yaw_deg"])
+    target_heading_deg = before["yaw_deg"]
+    if np.linalg.norm(target_vel[:2]) > 1e-6:
+        target_heading_deg = wrap_angle_deg(math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0]))))
+    yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=float(commanded_yaw_deg))
+    client.moveByVelocityAsync(
+        float(target_vel[0]),
+        float(target_vel[1]),
+        float(target_vel[2]),
+        CONTROL_DT,
+        drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+        yaw_mode=yaw_mode,
+        vehicle_name=vehicle_name,
+    )
+    time.sleep(CONTROL_DT + 0.15)
     after = get_state(client, vehicle_name)
     delta_pos = after["pos"] - before["pos"]
     delta_vel = after["vel"] - before["vel"]
+    expected_delta_vel = commanded_accel * CONTROL_DT
+    action_norm = float(np.linalg.norm(action))
+    accel_norm = float(np.linalg.norm(commanded_accel))
+    speed_xy = float(np.linalg.norm(target_vel[:2]))
     dominant_axis = int(np.argmax(np.abs(delta_vel)))
-    expected_axis = int(np.argmax(np.abs(action)))
-    expected_sign = int(np.sign(action[expected_axis])) if np.abs(action[expected_axis]) > 1e-6 else 0
+    expected_axis = int(np.argmax(np.abs(commanded_accel)))
+    expected_sign = int(np.sign(commanded_accel[expected_axis])) if np.abs(commanded_accel[expected_axis]) > 1e-6 else 0
     observed_sign = int(np.sign(delta_vel[expected_axis])) if np.abs(delta_vel[expected_axis]) > 1e-6 else 0
-    verdict = "pass" if dominant_axis == expected_axis and observed_sign == expected_sign else "suspicious"
+    heading_error_deg = abs(wrap_angle_deg(after["yaw_deg"] - target_heading_deg))
+    yaw_change_deg = wrap_angle_deg(after["yaw_deg"] - before["yaw_deg"])
+    delta_vel_error = delta_vel - expected_delta_vel
+    delta_vel_error_norm = float(np.linalg.norm(delta_vel_error))
+
+    if action_norm <= 1e-6:
+        verdict = "pass" if abs(yaw_change_deg) <= 5.0 and float(np.linalg.norm(delta_vel)) <= 0.5 else "suspicious"
+    elif accel_norm <= 1e-6:
+        verdict = "pass" if abs(yaw_change_deg) <= 5.0 else "suspicious"
+    elif speed_xy <= 0.1:
+        verdict = "pass" if abs(yaw_change_deg) <= 5.0 else "suspicious"
+    else:
+        verdict = "pass" if dominant_axis == expected_axis and observed_sign == expected_sign else "suspicious"
+
     return {
         "action": action.tolist(),
+        "commanded_accel": commanded_accel.tolist(),
+        "expected_delta_vel": expected_delta_vel.tolist(),
         "yaw": before["yaw_deg"],
+        "yaw_after": after["yaw_deg"],
+        "yaw_change_deg": float(yaw_change_deg),
         "target_vel": target_vel.tolist(),
+        "target_heading_deg": float(target_heading_deg),
+        "commanded_yaw_deg": float(commanded_yaw_deg),
+        "heading_error_deg": float(heading_error_deg),
+        "speed_xy": speed_xy,
         "delta_pos": delta_pos.tolist(),
         "delta_vel": delta_vel.tolist(),
+        "delta_vel_error_norm": delta_vel_error_norm,
         "dominant_axis": dominant_axis,
         "expected_axis": expected_axis,
         "expected_sign": expected_sign,
         "observed_sign": observed_sign,
+        "ang_acc_mag_before": before["ang_acc_mag"],
+        "ang_acc_mag_after": after["ang_acc_mag"],
+        "ang_acc_dim": int(before["ang_acc"].shape[0]),
         "verdict": verdict,
     }
 
@@ -448,7 +515,7 @@ def build_dashboard(scene, raw_gray, raw_color, zero_mask_vis, resized_vis, pool
     cv2.putText(canvas, "LiDAR validation", (10, 402), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
     lidar_lines = [
-        f"Yaw: {state['yaw_deg']:.1f} deg",
+        f"Yaw: {state['yaw_deg']:.1f} deg | Angular acc mag: {state['ang_acc_mag']:.3f}",
         f"Nearest LiDAR bin/dist: {lidar_report['nearest_bin']} / {lidar_report['nearest_distance']:.2f}m",
         f"Front density ratio vs rear: {lidar_report['front_back_density_ratio']:.2f}",
         f"LiDAR verdict: {lidar_report['verdict']}",
@@ -477,7 +544,7 @@ def build_dashboard(scene, raw_gray, raw_color, zero_mask_vis, resized_vis, pool
     ]
     draw_text_block(canvas, capture_lines, (10, 650), line_gap=22)
 
-    action_lines = ["Action probes (world/NED)"]
+    action_lines = ["Action probes (accel->integrated vel)"]
     action_lines.extend(action_summary)
     action_lines.append("")
     action_lines.append("Yaw rotation probe")
@@ -508,11 +575,19 @@ def summarize_action_results(results):
     for result in results[:8]:
         axis_map = ["X", "Y", "Z"]
         lines.append(
-            f"yaw={result['yaw']:+5.0f} {result['label']}: verdict={result['verdict']} dv={result['delta_vel'][0]:+.2f},{result['delta_vel'][1]:+.2f},{result['delta_vel'][2]:+.2f} dom={axis_map[result['dominant_axis']]}"
+            f"yaw={result['yaw']:+5.0f}->{result['yaw_after']:+5.0f} {result['label']}: {result['verdict']} dom={axis_map[result['dominant_axis']]} dverr={result['delta_vel_error_norm']:.2f} err={result['heading_error_deg']:.1f} aa={result['ang_acc_mag_after']:.2f}"
         )
-    if len(results) > 8:
+    if results:
         suspicious = sum(1 for r in results if r["verdict"] != "pass")
-        lines.append(f"total={len(results)} suspicious={suspicious} (+Z means descend in NED)")
+        low_speed = [r for r in results if r["speed_xy"] <= 0.3]
+        low_speed_max_yaw = max((abs(r["yaw_change_deg"]) for r in low_speed), default=0.0)
+        heading_mean = float(np.mean([r["heading_error_deg"] for r in results if r["speed_xy"] >= 0.6])) if any(r["speed_xy"] >= 0.6 for r in results) else 0.0
+        delta_vel_error_mean = float(np.mean([r["delta_vel_error_norm"] for r in results]))
+        aa_dims = sorted({r["ang_acc_dim"] for r in results})
+        lines.append(f"total={len(results)} suspicious={suspicious} head_err_mean={heading_mean:.1f} low_speed_max_yaw={low_speed_max_yaw:.1f}")
+        lines.append(f"dvel_err_mean={delta_vel_error_mean:.2f} aa_dim={aa_dims} aa_mag_after_mean={np.mean([r['ang_acc_mag_after'] for r in results]):.2f}")
+        lines.append("Pass criteria: delta_vel axis/sign follows commanded_accel*dt; yaw tracks integrated horizontal velocity")
+        lines.append(f"Note: +Z means descend in NED")
     return lines
 
 

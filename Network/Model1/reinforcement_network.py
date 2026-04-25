@@ -16,7 +16,8 @@ from preprocessing_utils import (
     downsample_depth_minpool,
     lidar_points_to_360,
     downsample_lidar_105,
-    action_to_target_velocity,
+    action_to_acceleration,
+    integrate_velocity_with_acceleration,
 )
 
 # 基于特征提取的网络自定义 SB3 要用到的特征提取器
@@ -105,9 +106,14 @@ class AirSimUAVEnv(gym.Env):
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
         self.start_dist = float(np.linalg.norm(self.start_rel_pos))                 # 起点与终点的距离
         self.dt = 0.5                                                               # 步长时间
+        self.accel_scale = 2.0                                                      # 让 action=1 在 0.5s 步长下不再只产生 0.5 的单步速度增量
         self.waypoints = []                                                         # 设置的中途点的坐标
-        self.current_wp_idx = 0                                                     # 当前步前经过的中途点的索引（经过中途点那一步才有用）
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)                # 15个中间点 + 1个终点
+        self.current_yaw_deg = 0.0
+        self.last_commanded_yaw_deg = 0.0
+        self.yaw_align_speed_on = 0.2
+        self.yaw_align_speed_off = 0.1
+        self.max_yaw_step_deg = 20.0
 
 
     # 深度图下采样函数
@@ -155,6 +161,30 @@ class AirSimUAVEnv(gym.Env):
         return downsample_lidar_105(lidar_data)
 
 
+
+    @staticmethod
+    def _wrap_angle_deg(angle_deg):
+        return ((angle_deg + 180.0) % 360.0) - 180.0
+
+    def _compute_soft_aligned_yaw_deg(self, target_vel):
+        # yaw 对齐的是积分后的期望水平速度方向，而不是 raw action 本身。
+        speed_xy = float(np.linalg.norm(target_vel[:2]))
+        commanded_yaw = float(self.last_commanded_yaw_deg)
+
+        if speed_xy >= self.yaw_align_speed_on:
+            desired_yaw_deg = math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0])))
+        elif speed_xy <= self.yaw_align_speed_off:
+            desired_yaw_deg = commanded_yaw
+        else:
+            desired_yaw_deg = commanded_yaw
+
+        yaw_delta = self._wrap_angle_deg(desired_yaw_deg - float(self.current_yaw_deg))
+        yaw_delta = float(np.clip(yaw_delta, -self.max_yaw_step_deg, self.max_yaw_step_deg))
+        commanded_yaw = self._wrap_angle_deg(float(self.current_yaw_deg) + yaw_delta)
+        self.last_commanded_yaw_deg = commanded_yaw
+        return commanded_yaw
+
+
     # 获取环境需要的信息的函数，包括状态向量和一些判别信息
     def _get_obs(self):
 
@@ -181,8 +211,10 @@ class AirSimUAVEnv(gym.Env):
         state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         # 无人机的当前的绝对位置
         pos = state.kinematics_estimated.position
-        # 无人机当前的目的地
+        # 无人机当前的朝向
         orient = state.kinematics_estimated.orientation
+        _, _, yaw_rad = airsim.to_eularian_angles(orient)
+        self.current_yaw_deg = self._wrap_angle_deg(math.degrees(yaw_rad))
         # 无人机当前的线速度
         vel = state.kinematics_estimated.linear_velocity
         # 无人机当前的角加速度
@@ -223,8 +255,7 @@ class AirSimUAVEnv(gym.Env):
             dis_z_bottom,
             dis_z_top
         ], dtype=np.float32)
-        # 保存当前绝对坐标和速度供 step 方法使用，减少 API 调用
-        self.current_position = drone_pos
+        # 保存当前速度供 step 方法使用，减少额外 API 调用
         self.current_velocity = velocity
 
 
@@ -237,45 +268,21 @@ class AirSimUAVEnv(gym.Env):
     def step(self, action):
         self.step_count += 1
 
-        # 运动控制：利用上一步缓存的速度进行矢量计算，该公式中的 current_velocity 其实是上一步的速度
-        # action 是 [-1, 1] 之间的 3 维向量
-        target_vel = action_to_target_velocity(self.current_velocity, action, dt=self.dt, max_v=10.0)
+        # 动作先映射为加速度命令，再在一个 RL 控制周期内积分成末端目标速度。
+        commanded_accel = action_to_acceleration(action, accel_scale=self.accel_scale)
+        target_vel = integrate_velocity_with_acceleration(
+            self.current_velocity,
+            commanded_accel,
+            dt=self.dt,
+            max_v=10.0,
+        )
 
 
-        # # 2. 核心修复：计算期望的偏航角 (Yaw)，让机头指向速度方向
-        # # 只要水平速度不为 0，就计算偏航角
-        # if np.linalg.norm([target_vel[0], target_vel[1]]) > 0.1:
-        #     # np.arctan2(y, x) 返回的是弧度
-        #     target_yaw_rad = math.atan2(target_vel[1], target_vel[0])
-        #     target_yaw_deg = math.degrees(target_yaw_rad)
-        # else:
-        #     # 如果速度很小（悬停），保持当前朝向
-        #     state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-        #     _, _, target_yaw_rad = airsim.to_eularian_angles(state.kinematics_estimated.orientation)
-        #     target_yaw_deg = math.degrees(target_yaw_rad)
-        #
-        # # 3. 使用带有 YawMode 的 API 发送指令
-        # # is_rate=False 表示 target_yaw_deg 是绝对角度，不是角速度
-        # yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=target_yaw_deg)
-        #
-        # self.client.moveByVelocityAsync(
-        #     float(target_vel[0]),
-        #     float(target_vel[1]),
-        #     float(target_vel[2]),
-        #     float(self.dt)*1.1,
-        #     drivetrain=airsim.DrivetrainType.ForwardOnly,  # 强制机头朝向运动方向
-        #     yaw_mode=yaw_mode,
-        #     vehicle_name=self.vehicle_name
-        # )
-        #
-        #
-        # try:
-        #     self.client.ping()
-        # except:
-        #     pass
-        #
-        # time.sleep(self.dt)
-
+        # AirSim 边界仍复用速度接口，但这里的 target_vel 已经来自加速度语义积分。
+        yaw_mode = airsim.YawMode(
+            is_rate=False,
+            yaw_or_rate=float(self._compute_soft_aligned_yaw_deg(target_vel)),
+        )
 
         # 取消 join() 阻塞，直接发送指令。
         self.client.moveByVelocityAsync(
@@ -283,6 +290,8 @@ class AirSimUAVEnv(gym.Env):
             float(target_vel[1]),
             float(target_vel[2]),
             float(self.dt),
+            drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+            yaw_mode=yaw_mode,
             vehicle_name=self.vehicle_name
         )
 
@@ -405,8 +414,9 @@ class AirSimUAVEnv(gym.Env):
             initial_yaw_rad = math.atan2(direction[1], direction[0])
         else:
             initial_yaw_rad = 0.0
-        # 记录初始的偏航角（角度制），供 step() 方法锁定朝向使用
-        self.init_yaw_deg = math.degrees(initial_yaw_rad)
+        initial_yaw_deg = math.degrees(initial_yaw_rad)
+        self.current_yaw_deg = initial_yaw_deg
+        self.last_commanded_yaw_deg = initial_yaw_deg
         pose = airsim.Pose(
             airsim.Vector3r(float(start_pos[0]), float(start_pos[1]), start_z),
             airsim.to_quaternion(0.0, 0.0, initial_yaw_rad),
@@ -418,27 +428,6 @@ class AirSimUAVEnv(gym.Env):
         self.client.moveByVelocityAsync(0, 0, 0, 1, vehicle_name=self.vehicle_name)
         time.sleep(1.0) # 延长重置等待时间，确保飞机被稳稳托在空中
 
-
-        # 计算从起点指向终点的单位方向向量
-        direction = self.current_target - self.current_start_pos
-        dist = float(np.linalg.norm(direction))
-        if dist > 1e-5:
-            unit_dir = direction / dist
-        else:
-            unit_dir = np.zeros(3, dtype=np.float32)
-        # 期望的初始加速度为 1.0 m/s^2，转化为初始状态的单步速度 (v = a * dt)
-        initial_accel = 1.0
-        initial_vel = unit_dir * initial_accel * self.dt
-        # 让无人机以该初始速度启动，提供一个飞向目标的初始动量，而不是死板地悬停在原地
-        self.client.moveByVelocityAsync(
-            float(initial_vel[0]),
-            float(initial_vel[1]),
-            float(initial_vel[2]),
-            0.5,  # 持续 1 秒，建立稳定的初始物理惯性
-            vehicle_name=self.vehicle_name
-        )
-        time.sleep(1.0)  # 等待物理状态稳定
-
         # 生成 16 个等间距航点 (15个中间点 + 1个终点)
         self.waypoints = []
         for i in range(1, 17):
@@ -449,6 +438,7 @@ class AirSimUAVEnv(gym.Env):
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)
 
 
+        # reset 后不再注入额外初速度，首拍运动完全交给策略动作决定。
         obs = self._get_obs()
         kin = obs["kinematics"]
         self.start_rel_pos = kin[0:3].copy()
@@ -540,8 +530,8 @@ class AirSimUAVEnv(gym.Env):
         """
         在终端实时格式化输出无人机飞行状态仪表盘
         """
-        # 实际使用的加速度 (对应 target_vel 的更新)
-        actual_acc = action * 1.0
+        # 实际使用的加速度命令
+        actual_acc = action_to_acceleration(action)
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
         print(f"\r[Step {self.step_count:4d}] "

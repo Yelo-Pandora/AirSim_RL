@@ -62,8 +62,15 @@ def downsample_lidar_105(lidar_360):
     return torch.from_numpy(downsampled).float()
 
 
-def action_to_target_velocity(current_velocity, action, dt=0.5, max_v=10.0):
-    target_vel = np.asarray(current_velocity, dtype=np.float32) + np.asarray(action, dtype=np.float32) * dt
+def action_to_acceleration(action, accel_scale=1.0):
+    # 保持网络输出维度不变，只在执行层把动作解释为三维连续加速度。
+    commanded_accel = np.asarray(action, dtype=np.float32) * float(accel_scale)
+    return commanded_accel.astype(np.float32)
+
+
+def integrate_velocity_with_acceleration(current_velocity, commanded_accel, dt=0.5, max_v=10.0):
+    # 单个控制周期内按恒加速度做一次速度积分，再保留原有速度上限裁剪。
+    target_vel = np.asarray(current_velocity, dtype=np.float32) + np.asarray(commanded_accel, dtype=np.float32) * dt
     v_mag = float(np.linalg.norm(target_vel))
     if v_mag > max_v and v_mag > 1e-6:
         target_vel = (target_vel / v_mag) * max_v
