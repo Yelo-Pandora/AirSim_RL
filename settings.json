@@ -57,7 +57,7 @@
           "VerticalFOVLower": 0,
           "HorizontalFOVStart": -180,
           "HorizontalFOVEnd": 180,
-          "DrawDebugPoints": true,
+          "DrawDebugPoints": false,
           "DataFrame": "SensorLocalFrame"
         }
       }
