@@ -66,6 +66,7 @@ class AirSimUAVEnv(gym.Env):
             print(f"警告：未找到或未能读取 {self.positions_file}，使用默认测试位置。")
 
 
+
         # 参数初始化
         # 动作空间: 3维连续加速度
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
@@ -114,6 +115,28 @@ class AirSimUAVEnv(gym.Env):
         self.yaw_align_speed_on = 0.2
         self.yaw_align_speed_off = 0.1
         self.max_yaw_step_deg = 20.0
+        self.depth_norm_max = 20.0
+        self.lidar_norm_max = 20.0
+        self.position_norm_max = 80.0
+        self.velocity_norm_max = 10.0
+        self.angular_acc_norm_max = 10.0
+        self.vertical_distance_norm_max = 40.0
+
+
+    def _normalize_depth_obs(self, depth_tensor):
+        return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
+
+    def _normalize_lidar_obs(self, lidar_tensor):
+        return torch.clamp(lidar_tensor / self.lidar_norm_max, 0.0, 1.0)
+
+    def _normalize_kinematics_obs(self, kin_data):
+        kin = kin_data.astype(np.float32).copy()
+        kin[0:3] = np.clip(kin[0:3] / self.position_norm_max, -1.0, 1.0)
+        kin[3] = np.clip(kin[3] / self.position_norm_max, 0.0, 1.0)
+        kin[4:7] = np.clip(kin[4:7] / self.velocity_norm_max, -1.0, 1.0)
+        kin[7] = np.clip(kin[7] / self.angular_acc_norm_max, 0.0, 1.0)
+        kin[8:10] = np.clip(kin[8:10] / self.vertical_distance_norm_max, 0.0, 1.0)
+        return kin
 
 
     # 深度图下采样函数
@@ -255,14 +278,22 @@ class AirSimUAVEnv(gym.Env):
             dis_z_bottom,
             dis_z_top
         ], dtype=np.float32)
-        # 保存当前速度供 step 方法使用，减少额外 API 调用
+        # 保存原始物理量，step/reset 中的奖励、终止和位置推导都必须使用未归一化数据。
+        self.current_rel_pos = rel_pos.astype(np.float32)
+        self.current_dis2goal = float(dis2goal)
         self.current_velocity = velocity
+        self.current_angular_acc = float(angular_acc_mag)
+        self.current_dis_z_bottom = float(dis_z_bottom)
+        self.current_dis_z_top = float(dis_z_top)
 
+        depth_obs = self._normalize_depth_obs(self.downsample_depth(raw_depth)).squeeze(0).cpu().numpy()
+        lidar_obs = self._normalize_lidar_obs(self.downsample_lidar(raw_lidar)).cpu().numpy()
+        kin_obs = self._normalize_kinematics_obs(kin_data)
 
         return {
-            "depth": self.downsample_depth(raw_depth).squeeze(0).cpu().numpy(),
-            "lidar": self.downsample_lidar(raw_lidar).cpu().numpy(),
-            "kinematics": kin_data
+            "depth": depth_obs,
+            "lidar": lidar_obs,
+            "kinematics": kin_obs
         }
 
     def step(self, action):
@@ -304,16 +335,15 @@ class AirSimUAVEnv(gym.Env):
         time.sleep(self.dt)
         # [统一调用] 在动作执行完后，统一调用一次 _get_obs() 获取所有最新数据
         obs = self._get_obs()
-        kin = obs["kinematics"]
 
 
-        # 获取动作执行后的无人机信息
-        rel_pos = kin[0:3]
-        dis2goal = kin[3]
-        velocity = kin[4:7]
-        angular_acc = kin[7]
-        dis_z_bottom = kin[8]
-        dis_z_top = kin[9]
+        # 获取动作执行后的无人机信息。这里必须使用 _get_obs 缓存的原始物理量，而不是归一化后的网络观测。
+        rel_pos = self.current_rel_pos.copy()
+        dis2goal = self.current_dis2goal
+        velocity = self.current_velocity.copy()
+        angular_acc = self.current_angular_acc
+        dis_z_bottom = self.current_dis_z_bottom
+        dis_z_top = self.current_dis_z_top
         progress = self.last_dis2goal - dis2goal
         self.last_dis2goal = dis2goal  # 更新记忆
         # 在 _get_obs() 中: rel_pos = target - drone_pos
@@ -352,6 +382,7 @@ class AirSimUAVEnv(gym.Env):
             perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
             crossed_border = bool(perpendicular_dist > 7.0)
         else:
+            perpendicular_dist = 0.0
             crossed_border = False
         # 添加一个飞行限高，当无人机飞出指定高度直接结束回合
         out_of_ceiling = bool(drone_pos[2] < -50.0)
@@ -371,7 +402,8 @@ class AirSimUAVEnv(gym.Env):
             'dis_z_bottom': dis_z_bottom,
             'dis_z_top': dis_z_top,
             'angular_acc': angular_acc,
-            'v_magnitude': v_magnitude
+            'v_magnitude': v_magnitude,
+            'perpendicular_dist': perpendicular_dist,
         }
         # 收尾部分
         reward = self._calculate_reward(info)
@@ -440,8 +472,7 @@ class AirSimUAVEnv(gym.Env):
 
         # reset 后不再注入额外初速度，首拍运动完全交给策略动作决定。
         obs = self._get_obs()
-        kin = obs["kinematics"]
-        self.start_rel_pos = kin[0:3].copy()
+        self.start_rel_pos = self.current_rel_pos.copy()
 
         # 使用目标和起点的绝对距离来计算 start_dist
         # 防止 kin[0:3] 相对坐标原点偏差导致 D 计算过小
@@ -455,38 +486,44 @@ class AirSimUAVEnv(gym.Env):
 
     def _calculate_reward(self, info):
         """按照论文公式 (2)-(14) 实现"""
-        r_progress = 15.0 * info.get('progress', 0.0)
+        progress = info.get('progress', 0.0)
+        r_progress = 25.0 * progress
+
         # R_path (公式 8)
         # 接近程度奖励
         r_proximity = 40 * (info.get('passed_waypoint', 0) / 15) if info.get('is_first_arrival', False) else 0
         # 到达奖励
         r_arrive = 500 if info['arrived'] else 0
-        # 步数奖励（实际上是距离奖励）
+
         d = info['dis2goal']
-        D = self.start_dist
+        D = max(self.start_dist, 1.0)
+        # 步数奖励（实际上是距离奖励）
         if d > D:
             r_step = -0.2 * (d / D)
         elif 3 <= d <= D:
             r_step = -0.01 * d
         else:
             r_step = -0.03
+
         # Direction奖励
         a_abs = abs(info['angle_to_target'])
         if a_abs < 10:
-            r_direction = 0.05
+            r_direction = 0.3
         elif 10 <= a_abs < 30:
-            r_direction = -0.2 * (a_abs / 180.0)
+            r_direction = 0.1
         elif 30 <= a_abs < 45:
-            r_direction = -0.3 * (a_abs / 180.0)
+            r_direction = -0.2 * (a_abs / 180.0)
         else:
             r_direction = -0.5 * (a_abs / 180.0)
-        # border奖励
+
+        # 保持原有 crossed_border 终止/惩罚机制，不在这里加入连续偏航越界惩罚。
         r_border = -400 if info['crossed_border'] else 0
         r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border
+
         # R_collision (公式 11)
         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
-        dis_z_bottom = info['dis_z_bottom']  # 离地面障碍物距离
-        dis_z_top = info['dis_z_top']       # 距离上方障碍物的距离
+        dis_z_bottom = info['dis_z_bottom']
+        dis_z_top = info['dis_z_top']
         # 与地面障碍物距离定义的奖励
         if 0.5 <= dis_z_bottom < 1:
             r_z_bottom = -0.05
@@ -524,7 +561,7 @@ class AirSimUAVEnv(gym.Env):
 
         r_survival = 0.5 if not (info['collision'] or info.get('out_of_ceiling', False)) else 0.0
 
-        return r_path + r_collision + r_stabilization +r_survival
+        return r_progress + r_path + r_collision + r_stabilization + r_survival
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """

@@ -33,8 +33,8 @@ def main():
     # 定义动作噪声 (Action Noise)
     # TD3 是 Off-Policy 确定性算法，必须依靠外部添加的噪声来进行动作空间的探索
     n_actions = env.action_space.shape[-1]
-    # 使用高斯噪声 (均值为0，标准差为0.1)
-    action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
+    # 提高探索强度，避免过早塌缩到固定方向动作模板
+    action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.2 * np.ones(n_actions))
 
     # 配置自定义特征提取器
     policy_kwargs = dict(
@@ -49,9 +49,9 @@ def main():
     model = TD3(
         policy="MultiInputPolicy",  # 因为 observation_space 是 Dict，须用 MultiInputPolicy
         env=vec_env,                        # 训练环境
-        learning_rate=1e-3,                 # 学习率
+        learning_rate=1e-4,                 # 学习率
         buffer_size = 2 ** 18,              # 经验回放池大小
-        learning_starts = 1000,             # 收集多少步随机经验后才开始更新网络
+        learning_starts = 5000,             # 先积累更多多样经验，再开始更新网络
         batch_size = 256,                   # 每次采样的批次大小
         gamma=0.986,                        # 学习衰减率
         tau=0.005,                          # 软更新系数
@@ -67,7 +67,7 @@ def main():
 
     # 开始训练
     print("Starting training...")
-    total_timesteps = 15000  # 设置训练的总步数
+    total_timesteps = 300000  # 设置训练的总步数
     model.learn(
         total_timesteps=total_timesteps,
         tb_log_name="TD3_AirSim_Run1",  # TensorBoard 中显示的实验名称
