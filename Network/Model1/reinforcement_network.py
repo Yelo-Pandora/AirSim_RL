@@ -121,7 +121,31 @@ class AirSimUAVEnv(gym.Env):
         self.velocity_norm_max = 10.0
         self.angular_acc_norm_max = 10.0
         self.vertical_distance_norm_max = 40.0
+        #目的地可视化开关
+        self.visualize_goal = True
+        # 飞行轨迹可视化开关
+        self.visualize_traj = True
 
+        # 显示用整体上移高度，单位：米
+        # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高
+        self.visual_z_offset = 20.0
+
+        self.traj_points = []
+        self.traj_refresh_interval = 1
+        self.traj_duration = 0.8
+        self.traj_thickness = 6.0
+
+        # 标记刷新间隔。你的 dt=0.5，所以每 1 步刷新一次即可
+        self.marker_refresh_interval = 1
+
+        # 标记持续时间，略大于 dt，防止闪烁
+        self.marker_duration = 0.8
+        # 终点判定半径，你 step() 里现在是 dis2goal < 1.5
+        self.goal_radius = 1.5
+
+        # 是否显示 16 个航点
+        self.visualize_waypoints = True
+        self.show_goal_text = False
 
     def _normalize_depth_obs(self, depth_tensor):
         return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
@@ -349,7 +373,11 @@ class AirSimUAVEnv(gym.Env):
         # 在 _get_obs() 中: rel_pos = target - drone_pos
         # 逆向推导无人机位置，省去 getMultirotorState 调用
         drone_pos = self.current_target - rel_pos
+        #每走一步，就把当前位置加到轨迹里，并定期重画
+        self.traj_points.append(drone_pos.copy())
 
+        if self.visualize_traj and self.step_count % self.traj_refresh_interval == 0:
+            self._draw_trajectory()
 
         # 检查航点经过逻辑
         passed_waypoint_id = 0
@@ -410,14 +438,177 @@ class AirSimUAVEnv(gym.Env):
         terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
         self._render_dashboard(action, drone_pos, velocity, reward, terminated, truncated, info)
-
+        if self.visualize_goal and self.step_count % self.marker_refresh_interval == 0:
+            self._draw_goal_marker()
 
         return obs, reward, terminated, truncated, info
+
+    def _airsim_vec(self, arr, visual_offset=True):
+        """
+        numpy/list -> AirSim Vector3r
+
+        visual_offset=True 时，只把显示用的点、线、轨迹整体向上抬高；
+        不改变 current_target、current_start_pos、reward、dis2goal 等真实训练逻辑。
+        """
+        z = float(arr[2])
+
+        if visual_offset:
+            # AirSim / Colosseum 是 NED 坐标，z 减小表示向上
+            z -= float(self.visual_z_offset)
+
+        return airsim.Vector3r(
+            float(arr[0]),
+            float(arr[1]),
+            z
+        )
+
+    def _clear_visual_markers(self):
+        try:
+            self.client.simFlushPersistentMarkers()
+        except Exception as e:
+            print(f"[Marker Warning] 清除持久标记失败: {e}")
+
+    def _draw_goal_marker(self):
+        """
+        用非持久化方式绘制当前回合的终点标记。
+        旧标记会自动过期，不会跨 episode 残留。
+        """
+        if not self.visualize_goal:
+            return
+
+        try:
+            duration = float(self.marker_duration)
+
+            target = self._airsim_vec(self.current_target)
+            start = self._airsim_vec(self.current_start_pos)
+
+            # 起点绿色点
+            self.client.simPlotPoints(
+                [start],
+                color_rgba=[0.0, 1.0, 0.0, 1.0],
+                size=20.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 终点红色点
+            self.client.simPlotPoints(
+                [target],
+                color_rgba=[1.0, 0.0, 0.0, 1.0],
+                size=35.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 起点到终点的参考线
+            self.client.simPlotLineStrip(
+                [start, target],
+                color_rgba=[0.0, 0.6, 1.0, 1.0],
+                thickness=4.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 终点判定圆圈
+            self._draw_goal_circle(duration)
+
+            # 航点
+            if hasattr(self, "waypoints") and self.waypoints:
+                waypoint_points = [self._airsim_vec(wp) for wp in self.waypoints]
+                self.client.simPlotPoints(
+                    waypoint_points,
+                    color_rgba=[1.0, 0.5, 0.0, 1.0],
+                    size=10.0,
+                    duration=duration,
+                    is_persistent=False
+                )
+
+            # 文字不要永久显示
+            if self.show_goal_text:
+                self.client.simPlotStrings(
+                    ["GOAL"],
+                    [
+                        airsim.Vector3r(
+                            float(self.current_target[0]),
+                            float(self.current_target[1]),
+                            float(self.current_target[2]) - float(self.visual_z_offset) - 2.0
+                        )
+                    ],
+                    scale=2.5,
+                    color_rgba=[1.0, 0.0, 0.0, 1.0],
+                    duration=duration
+                )
+
+        except Exception as e:
+            print(f"[Marker Warning] 绘制终点标记失败: {e}")
+
+    def _draw_goal_circle(self, duration):
+        circle_points = []
+        radius = float(self.goal_radius)
+
+        for i in range(65):
+            theta = 2.0 * math.pi * i / 64.0
+            x = float(self.current_target[0]) + radius * math.cos(theta)
+            y = float(self.current_target[1]) + radius * math.sin(theta)
+
+            # 显示用圆圈整体向上抬高
+            z = float(self.current_target[2]) - float(self.visual_z_offset)
+
+            circle_points.append(airsim.Vector3r(x, y, z))
+
+        self.client.simPlotLineStrip(
+            circle_points,
+            color_rgba=[1.0, 1.0, 0.0, 1.0],
+            thickness=4.0,
+            duration=duration,
+            is_persistent=False
+        )
+    def _draw_waypoint_markers(self):
+        """
+        绘制 reset() 中生成的 16 个等间距航点。
+        """
+        if not self.waypoints:
+            return
+
+        waypoint_points = [self._airsim_vec(wp) for wp in self.waypoints]
+
+        self.client.simPlotPoints(
+            waypoint_points,
+            color_rgba=[1.0, 0.5, 0.0, 1.0],
+            size=12.0,
+            duration=-1.0,
+            is_persistent=True
+        )
+
+
+    def _draw_trajectory(self):
+        if not self.visualize_traj:
+            return
+
+        if len(self.traj_points) < 2:
+            return
+
+        try:
+            # 轨迹只在显示上整体上移，不改变真实无人机位置
+            airsim_points = [
+                self._airsim_vec(p, visual_offset=True)
+                for p in self.traj_points
+            ]
+
+            self.client.simPlotLineStrip(
+                airsim_points,
+                color_rgba=[0.0, 1.0, 0.0, 1.0],
+                thickness=self.traj_thickness,
+                duration=self.traj_duration,
+                is_persistent=False
+            )
+        except Exception as e:
+            print(f"[Trajectory Warning] 绘制轨迹失败: {e}")
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0
-
+        self.traj_points = []
         # 如果 options 中没有指定具体的 target，则从数据集中随机选一个
         options = options or {}
         if "start_pos" in options and "target" in options:
@@ -431,14 +622,15 @@ class AirSimUAVEnv(gym.Env):
         self.current_start_pos = np.array(start_pos, dtype=np.float32)
         self.current_target = np.array(target_pos, dtype=np.float32)
         # 重置airsim环境
+        self._clear_visual_markers()
         self.client.reset()
         self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
         self.client.armDisarm(True, vehicle_name=self.vehicle_name)
-
+        self._clear_visual_markers()
         # 传送无人机
         # 在 AirSim 中，Z轴负方向是向上。
         # 当设置为 -2.0 时，指的是“相对于出生点向上 2 米”
-        start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10.0
+        start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10
         self.current_start_pos[2] = start_z
         # 计算起点到终点的二维方向，获取初始偏航角(Yaw)
         direction = self.current_target - self.current_start_pos
@@ -468,6 +660,8 @@ class AirSimUAVEnv(gym.Env):
             wp = self.current_start_pos + (self.current_target - self.current_start_pos) * ratio
             self.waypoints.append(wp)
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)
+        # 绘制当前回合的终点、起点、航点和参考路径
+        self._draw_goal_marker()
 
 
         # reset 后不再注入额外初速度，首拍运动完全交给策略动作决定。
