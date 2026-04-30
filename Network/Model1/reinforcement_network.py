@@ -122,9 +122,9 @@ class AirSimUAVEnv(gym.Env):
         self.angular_acc_norm_max = 10.0
         self.vertical_distance_norm_max = 40.0
         #目的地可视化开关
-        self.visualize_goal = True
+        self.visualize_goal = False
         # 飞行轨迹可视化开关
-        self.visualize_traj = True
+        self.visualize_traj = False
 
         # 显示用整体上移高度，单位：米
         # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高
@@ -144,7 +144,7 @@ class AirSimUAVEnv(gym.Env):
         self.goal_radius = 1.5
 
         # 是否显示 16 个航点
-        self.visualize_waypoints = True
+        self.visualize_waypoints = False
         self.show_goal_text = False
 
     def _normalize_depth_obs(self, depth_tensor):
