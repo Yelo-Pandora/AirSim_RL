@@ -1,290 +1,159 @@
-"""
-Cost functions and gradients for EGO-Planner trajectory optimization.
-Implements smoothness (Js), collision (Jc), and feasibility (Jd) terms
-with analytical gradients, following the EGO-Planner paper formulas.
-"""
-
 import numpy as np
-from typing import List, Tuple, Dict
 
 
-def _compute_accel_jerk_cps(cps: np.ndarray, dt: float):
-    """Compute acceleration and jerk control points from position control points."""
-    vel_cps = (cps[1:] - cps[:-1]) / dt
-    accel_cps = (vel_cps[1:] - vel_cps[:-1]) / dt
-    jerk_cps = (accel_cps[1:] - accel_cps[:-1]) / dt
-    return accel_cps, jerk_cps
-
-
-def smoothness_cost(cps: np.ndarray, dt: float) -> Tuple[float, np.ndarray]:
+def cost_smoothness(spline, n_samples=20):
     """
-    Smoothness penalty: Js = sum(||Ai||^2) + sum(||Ji||^2)
-    Minimizes acceleration and jerk along the trajectory.
-
-    Args:
-        cps: (Nc, 3) control points
-        dt: time interval
-
-    Returns:
-        (cost, gradient) where gradient has shape (Nc, 3)
+    J_s: Smoothness cost — penalize 4th derivative (snap) of B-spline.
+    Approximated by penalizing 2nd derivative (acceleration) differences.
+    Returns: (cost, gradient w.r.t. control_points)
     """
-    nc = len(cps)
-    grad = np.zeros_like(cps)
+    ctrl = spline.control_points
+    grad = np.zeros_like(ctrl)
+    cost = 0.0
 
-    # Velocity and acceleration control points
-    vel_cps = (cps[1:] - cps[:-1]) / dt  # (nc-1, 3)
-    accel_cps = (vel_cps[1:] - vel_cps[:-1]) / dt  # (nc-2, 3)
-    jerk_cps = (accel_cps[1:] - accel_cps[:-1]) / dt  # (nc-3, 3)
-
-    # Cost: sum of squared norms
-    cost = np.sum(accel_cps ** 2) + np.sum(jerk_cps ** 2)
-
-    # Gradient of Js w.r.t. each control point
-    # Acceleration term: Ai = (Vi+1 - Vi) / dt = (Qi+2 - 2*Qi+1 + Qi) / dt^2
-    # d||Ai||^2 / dQi = 2 * Ai * dAi/dQi
-    # dAi/dQi = [1, -2, 1] / dt^2 at positions [i, i+1, i+2]
-
-    inv_dt2 = 1.0 / (dt * dt)
-    inv_dt4 = inv_dt2 * inv_dt2  # for jerk
-
-    # Acceleration gradient contribution
-    # Ai = (Qi+2 - 2*Qi+1 + Qi) * inv_dt2
-    # d||Ai||^2/dQi = 2*Ai * inv_dt2  (at Qi)
-    # d||Ai||^2/dQi+1 = 2*Ai * (-2*inv_dt2)  (at Qi+1)
-    # d||Ai||^2/dQi+2 = 2*Ai * inv_dt2  (at Qi+2)
-    for i in range(nc - 2):
-        ai = accel_cps[i]  # (3,)
-        g_coeff = 2.0 * ai * inv_dt2
-        if i < nc:
-            grad[i] += g_coeff
-        if i + 1 < nc:
-            grad[i + 1] += -2.0 * g_coeff
-        if i + 2 < nc:
-            grad[i + 2] += g_coeff
-
-    # Jerk gradient contribution
-    # Ji = (Ai+1 - Ai) / dt = (Qi+3 - 3*Qi+2 + 3*Qi+1 - Qi) / dt^3
-    # d||Ji||^2/dQi = 2*Ji * dJi/dQi
-    inv_dt3 = inv_dt2 / dt
-    for i in range(nc - 3):
-        ji = jerk_cps[i]  # (3,)
-        g_coeff = 2.0 * ji * inv_dt3
-        if i < nc:
-            grad[i] += -g_coeff
-        if i + 1 < nc:
-            grad[i + 1] += 3.0 * g_coeff
-        if i + 2 < nc:
-            grad[i + 2] += -3.0 * g_coeff
-        if i + 3 < nc:
-            grad[i + 3] += g_coeff
+    for i in range(len(ctrl) - 2):
+        diff = ctrl[i] - 2 * ctrl[i + 1] + ctrl[i + 2]
+        cost += np.dot(diff, diff)
+        grad[i] += 2 * diff
+        grad[i + 1] += -4 * diff
+        grad[i + 2] += 2 * diff
 
     return cost, grad
 
 
-def collision_cost(cps: np.ndarray,
-                   obstacle_pairs: List[List[Tuple[np.ndarray, np.ndarray]]],
-                   sf: float) -> Tuple[float, np.ndarray]:
+def cost_collision(spline, voxel_grid, radius=0.5, n_samples=30):
     """
-    Collision penalty using repulsive forces from obstacle pairs.
-
-    For each control point Qi with {p, v} pairs:
-      dij = (Qi - pij) . vij   (distance to obstacle)
-      cij = sf - dij
-      jc(i,j) = piecewise(cij)
-
-    Args:
-        cps: (Nc, 3) control points
-        obstacle_pairs: list of lists, obstacle_pairs[i] contains [(p_j, v_j), ...] for Qi
-        sf: safety clearance
-
-    Returns:
-        (cost, gradient) where gradient has shape (Nc, 3)
+    J_c: Collision cost — penalize trajectory points inside obstacles.
+    Uses the voxel grid for obstacle queries.
+    Returns: (cost, gradient w.r.t. control_points)
     """
-    nc = len(cps)
+    duration = spline.duration
     cost = 0.0
-    grad = np.zeros_like(cps)
+    ctrl_grad = np.zeros_like(spline.control_points)
 
-    for i in range(nc):
-        if i >= len(obstacle_pairs) or not obstacle_pairs[i]:
+    for k in range(n_samples):
+        t = k / n_samples * duration
+        pt = spline.eval(t)
+        vel = spline.eval_derivative(t, order=1)
+        speed = np.linalg.norm(vel)
+        if speed < 1e-6:
             continue
+        vel_norm = vel / speed
 
-        for p_j, v_j in obstacle_pairs[i]:
-            dij = np.dot(cps[i] - p_j, v_j)
-            cij = sf - dij
+        dist, obstacle_pt = voxel_grid.get_distance_with_obstacle(pt)
 
-            if cij <= 0:
-                # No penalty
-                continue
-            elif cij <= sf:
-                # Cubic region: cij^3
-                cost += cij ** 3
-                # Gradient: dJc/dQi = -3*cij^2 * vij
-                grad[i] += -3.0 * (cij ** 2) * v_j
-            else:
-                # Quadratic region: 3*sf*cij^2 - 3*sf^2*cij + sf^3
-                cost += 3.0 * sf * cij * cij - 3.0 * sf * sf * cij + sf ** 3
-                # Gradient: dJc/dQi = -(6*sf*cij - 3*sf^2) * vij
-                grad[i] += -(6.0 * sf * cij - 3.0 * sf * sf) * v_j
+        if dist < radius:
+            penalty = (radius - dist) ** 2
+            cost += penalty
+            dir_grad = 2 * (radius - dist) * (pt - obstacle_pt) / (np.linalg.norm(pt - obstacle_pt) + 1e-8)
+            db = spline_basis_grad_at_ctrl(t, spline, k_index=None)
+            for i in range(len(spline.control_points)):
+                bi = _basis_derivative(i, spline.order, t + spline.knots[0], spline.knots)
+                ctrl_grad[i] += dir_grad * bi
 
-    return cost, grad
+    return cost, ctrl_grad
 
 
-def _f_penalty_and_grad(cr: float, cm: float, cj_split: float,
-                        lam: float) -> Tuple[float, float]:
+def cost_dynamic_feasibility(spline, v_max=2.1, a_max=3.0, n_samples=20):
     """
-    Piecewise feasibility penalty F and its derivative for a single dimension.
-
-    Regions:
-      cr <= -cj:     a1*cr^2 + b1*cr + c1
-      -cj < cr < -lc: (-lc - cr)^3
-      -lc <= cr <= lc: 0
-      lc < cr < cj:  (cr - lc)^3
-      cr >= cj:      a2*cr^2 + b2*cr + c2
-
-    Where lc = lam * cm.
+    J_d: Dynamic feasibility cost — penalize velocity and acceleration exceeding limits.
+    Returns: (cost, gradient w.r.t. control_points)
     """
-    lc = lam * cm  # elastic limit
-
-    if -lc <= cr <= lc:
-        return 0.0, 0.0
-    elif -cj_split < cr < -lc:
-        diff = -lc - cr
-        return diff ** 3, -3.0 * diff ** 2
-    elif lc < cr < cj_split:
-        diff = cr - lc
-        return diff ** 3, 3.0 * diff ** 2
-    elif cr <= -cj_split:
-        # Quadratic region matching value and derivative at -cj_split
-        val_neg, grad_neg = _f_penalty_and_grad(-cj_split + 1e-10, cm, cj_split, lam)
-        a1 = 3.0 * (-cj_split + lc) ** 2 / (2.0 * (-cj_split))
-        b1 = -2.0 * a1 * (-cj_split)
-        c1 = val_neg - a1 * (-cj_split) ** 2 - b1 * (-cj_split)
-        return a1 * cr ** 2 + b1 * cr + c1, 2.0 * a1 * cr + b1
-    else:  # cr >= cj_split
-        a2 = 3.0 * (cj_split - lc) ** 2 / (2.0 * cj_split)
-        b2 = -2.0 * a2 * cj_split
-        val_pos, grad_pos = _f_penalty_and_grad(cj_split - 1e-10, cm, cj_split, lam)
-        c2 = val_pos - a2 * cj_split ** 2 - b2 * cj_split
-        return a2 * cr ** 2 + b2 * cr + c2, 2.0 * a2 * cr + b2
-
-
-def feasibility_cost(cps: np.ndarray, dt: float,
-                     v_max: float, a_max: float, j_max: float,
-                     lam: float = 0.9,
-                     split_ratio: float = 1.5) -> Tuple[float, np.ndarray]:
-    """
-    Feasibility penalty: restricts velocity, acceleration, jerk on each dimension.
-
-    Jd = sum_i [wv * F(Vi) + wa * F(Ai) + wj * F(Ji)]
-
-    Args:
-        cps: (Nc, 3) control points
-        dt: time interval
-        v_max, a_max, j_max: derivative limits
-        lam: elastic coefficient (< 1)
-        split_ratio: cj = split_ratio * cm for quadratic/cubic split point
-
-    Returns:
-        (cost, gradient) where gradient has shape (Nc, 3)
-    """
-    nc = len(cps)
-    grad = np.zeros_like(cps)
-
-    vel_cps = (cps[1:] - cps[:-1]) / dt  # (nc-1, 3)
-    accel_cps = (vel_cps[1:] - vel_cps[:-1]) / dt  # (nc-2, 3)
-    jerk_cps = (accel_cps[1:] - accel_cps[:-1]) / dt  # (nc-3, 3)
-
-    limits = [
-        (vel_cps, v_max, 1.0),   # velocity
-        (accel_cps, a_max, 1.0),  # acceleration
-        (jerk_cps, j_max, 1.0),   # jerk
-    ]
-
+    duration = spline.duration
     cost = 0.0
-    for deriv_cps, cm, weight in limits:
-        cj_split = split_ratio * cm
-        n_deriv = len(deriv_cps)
+    ctrl_grad = np.zeros_like(spline.control_points)
+    eps = 1e-6
 
-        for i in range(n_deriv):
-            for dim in range(3):
-                cr = deriv_cps[i, dim]
-                val, dval = _f_penalty_and_grad(cr, cm, cj_split, lam)
-                cost += weight * val
+    for k in range(n_samples):
+        t = k / n_samples * duration
+        vel = spline.eval_derivative(t, order=1)
+        acc = spline.eval_derivative(t, order=2)
 
-                # Back-propagate gradient to control points
-                # For velocity: Vi = (Qi+1 - Qi) / dt
-                # For acceleration: Ai = (Qi+2 - 2*Qi+1 + Qi) / dt^2
-                # For jerk: Ji = (Qi+3 - 3*Qi+2 + 3*Qi+1 - Qi) / dt^3
+        # Clamp extreme values
+        vel = np.clip(vel, -100, 100)
+        acc = np.clip(acc, -1000, 1000)
 
-                g_dim = weight * dval
+        v_norm = np.linalg.norm(vel)
+        if v_norm > v_max:
+            penalty = (v_norm - v_max) ** 2
+            cost += penalty
+            grad_dir = 2 * (v_norm - v_max) * vel / max(v_norm, eps)
+            for i in range(len(spline.control_points)):
+                bi = _basis_derivative(i, spline.order, t + spline.knots[0], spline.knots)
+                ctrl_grad[i] += grad_dir * bi
 
-                if deriv_cps is vel_cps:
-                    # dVi/dQi = -1/dt, dVi/dQi+1 = 1/dt
-                    inv = g_dim / dt
-                    grad[i, dim] -= inv
-                    grad[i + 1, dim] += inv
-                elif deriv_cps is accel_cps:
-                    # dAi/dQi = 1/dt^2, dAi/dQi+1 = -2/dt^2, dAi/dQi+2 = 1/dt^2
-                    inv = g_dim / (dt * dt)
-                    grad[i, dim] += inv
-                    grad[i + 1, dim] -= 2.0 * inv
-                    grad[i + 2, dim] += inv
-                elif deriv_cps is jerk_cps:
-                    inv = g_dim / (dt * dt * dt)
-                    grad[i, dim] -= inv
-                    grad[i + 1, dim] += 3.0 * inv
-                    grad[i + 2, dim] -= 3.0 * inv
-                    grad[i + 3, dim] += inv
+        a_norm = np.linalg.norm(acc)
+        if a_norm > a_max:
+            penalty = (a_norm - a_max) ** 2
+            cost += penalty
+            grad_dir = 2 * (a_norm - a_max) * acc / max(a_norm, eps)
+            for i in range(len(spline.control_points)):
+                bi = _basis_second_derivative(i, spline.order, t + spline.knots[0], spline.knots)
+                ctrl_grad[i] += grad_dir * bi
 
-    return cost, grad
+    return cost, ctrl_grad
 
 
-def compute_total_cost_and_gradient(
-        cps: np.ndarray, dt: float,
-        obstacle_pairs: List[List[Tuple[np.ndarray, np.ndarray]]],
-        weights: Dict[str, float],
-        limits: Dict[str, float],
-        sf: float = 0.5,
-        lam: float = 0.9) -> Tuple[float, np.ndarray]:
+def cost_local_target(spline, target_pos, target_vel, t_end=None,
+                     weight_pos=1.0, weight_vel=0.5):
     """
-    Compute the total cost and gradient as weighted sum of Js, Jc, Jd.
-
-    Args:
-        cps: (Nc, 3) control points
-        dt: time interval
-        obstacle_pairs: collision obstacle pairs per control point
-        weights: {'lambda_s': float, 'lambda_c': float, 'lambda_d': float}
-        limits: {'v_max': float, 'a_max': float, 'j_max': float}
-        sf: safety clearance
-        lam: elastic coefficient for feasibility
-
-    Returns:
-        (total_cost, total_gradient) where gradient has shape (Nc, 3)
+    J_lp: Local target cost — penalize deviation of trajectory end from local target.
+    Eq. 18: J_lp = λp * ||p(tlp) - plp||^2 + λv * ||v(tlp) - vlp||^2
+    Returns: (cost, gradient w.r.t. control_points)
     """
-    nc = len(cps)
-    total_cost = 0.0
-    total_grad = np.zeros_like(cps)
+    if t_end is None:
+        t_end = spline.duration
 
-    # Smoothness
-    if weights.get('lambda_s', 0) > 0:
-        js, gs = smoothness_cost(cps, dt)
-        total_cost += weights['lambda_s'] * js
-        total_grad += weights['lambda_s'] * gs
+    pos_err = spline.eval(t_end) - target_pos
+    vel_err = spline.eval_derivative(t_end, order=1) - target_vel
 
-    # Collision
-    if weights.get('lambda_c', 0) > 0 and obstacle_pairs:
-        jc, gc = collision_cost(cps, obstacle_pairs, sf)
-        total_cost += weights['lambda_c'] * jc
-        total_grad += weights['lambda_c'] * gc
+    cost = weight_pos * np.dot(pos_err, pos_err) + weight_vel * np.dot(vel_err, vel_err)
 
-    # Feasibility
-    if weights.get('lambda_d', 0) > 0:
-        jd, gd = feasibility_cost(cps, dt,
-                                  limits.get('v_max', 5.0),
-                                  limits.get('a_max', 8.0),
-                                  limits.get('j_max', 20.0),
-                                  lam)
-        total_cost += weights['lambda_d'] * jd
-        total_grad += weights['lambda_d'] * gd
+    ctrl_grad = np.zeros_like(spline.control_points)
+    for i in range(len(spline.control_points)):
+        t_k = t_end + spline.knots[0]
+        bi = _basis_function(i, spline.order, t_k, spline.knots)
+        bi_d = _basis_derivative(i, spline.order, t_k, spline.knots)
+        ctrl_grad[i] += 2 * weight_pos * pos_err * bi + 2 * weight_vel * vel_err * bi_d
 
-    return total_cost, total_grad
+    return cost, ctrl_grad
+
+
+def _basis_function(i, k, u, knots):
+    """De Boor-Cox basis function."""
+    if k == 1:
+        return 1.0 if knots[i] <= u < knots[i + 1] else 0.0
+    denom1 = knots[i + k - 1] - knots[i]
+    denom2 = knots[i + k] - knots[i + 1]
+    term1 = ((u - knots[i]) / denom1 * _basis_function(i, k - 1, u, knots)) if denom1 > 1e-10 else 0.0
+    term2 = ((knots[i + k] - u) / denom2 * _basis_function(i + 1, k - 1, u, knots)) if denom2 > 1e-10 else 0.0
+    return term1 + term2
+
+
+def _basis_derivative(i, k, u, knots):
+    """First derivative of basis function."""
+    if k <= 1:
+        return 0.0
+    denom1 = knots[i + k - 1] - knots[i]
+    denom2 = knots[i + k] - knots[i + 1]
+    term1 = (k - 1) / denom1 * _basis_function(i, k - 1, u, knots) if denom1 > 1e-10 else 0.0
+    term2 = (k - 1) / denom2 * _basis_function(i + 1, k - 1, u, knots) if denom2 > 1e-10 else 0.0
+    return term1 - term2
+
+
+def _basis_second_derivative(i, k, u, knots):
+    """Second derivative of basis function."""
+    if k <= 2:
+        return 0.0
+    denom1 = knots[i + k - 1] - knots[i]
+    denom2 = knots[i + k] - knots[i + 1]
+    term1 = (k - 1) / denom1 * _basis_derivative(i, k - 1, u, knots) if denom1 > 1e-10 else 0.0
+    term2 = (k - 1) / denom2 * _basis_derivative(i + 1, k - 1, u, knots) if denom2 > 1e-10 else 0.0
+    return term1 - term2
+
+
+def spline_basis_grad_at_ctrl(t, spline, k_index=None):
+    """Helper: get basis function values at t for gradient computation."""
+    t_k = t + spline.knots[0]
+    return np.array([_basis_function(i, spline.order, t_k, spline.knots)
+                     for i in range(len(spline.control_points))])

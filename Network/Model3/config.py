@@ -1,82 +1,78 @@
-"""
-Model3 Configuration
-All hyperparameters and constants for RL + EGO-Planner hybrid system.
-"""
+# config.py — RLoPlanner hyperparameters from the paper
 
-# === RL Hyperparameters ===
-LEARNING_RATE = 1e-3
-BUFFER_SIZE = 2 ** 18  # 262144
-BATCH_SIZE = 256
-GAMMA = 0.99
-TAU = 0.005
-POLICY_NOISE = 0.2
-NOISE_CLIP = 0.5
-POLICY_FREQ = 2
-TOTAL_TIMESTEPS = 1_500_000
-SAVE_FREQ = 50_000
+# ============== UAV Model ==============
+UAV_MAX_SPEED = 2.1          # m/s
+UAV_ALTITUDE_MIN = 0.0       # m
+UAV_ALTITUDE_MAX = 10.0      # m
+UAV_RADIUS = 0.5             # m, collision radius
+UAV_ARRIVE_DIST = 0.5        # m, goal arrival threshold
 
-# === EGO-Planner Parameters ===
-PB = 3  # B-spline degree (cubic)
-NC = 25  # Number of control points
-INIT_DT = 0.3  # Initial time interval between control points (seconds)
-HORIZON = 7.0  # Planning horizon in meters
-PLANNER_DT_SCALE = 0.3  # dt per control point in meters (initial spacing)
+# ============== EGO-Planner ==============
+PLANNER_HORIZON = 5.0        # m, trajectory planning horizon
+PLANNER_DT = 0.1             # s, control loop period
+PLANNER_OPTIM_ITERS = 50     # gradient descent iterations per planning step
+PLANNER_LR = 0.1             # learning rate for trajectory optimization
 
-# === Cost Function Weights ===
-LAMBDA_S = 1.0  # Smoothness weight
-LAMBDA_C = 10.0  # Collision weight
-LAMBDA_D = 5.0  # Feasibility weight
-LAMBDA_F = 20.0  # Curve fitting weight
+# B-spline parameters
+BSPLINE_ORDER = 4            # cubic B-spline
+BSPLINE_CTRL_POINTS = 10     # number of control points
+BSPLINE_DT = 0.2             # time interval between control points
 
-# === Physical Limits ===
-V_MAX = 5.0  # Max velocity (m/s)
-A_MAX = 8.0  # Max acceleration (m/s^2)
-J_MAX = 20.0  # Max jerk (m/s^3)
-V_MARGIN = 0.9  # Elastic coefficient for feasibility (lambda < 1)
+# Cost function weights (Eq. 17: J = λ1*Js + λ2*Jc + λ3*Jd + λ4*Jlp)
+COST_SMOOTH_WEIGHT = 1.0     # λ1, trajectory smoothness
+COST_COLLISION_WEIGHT = 10.0  # λ2, obstacle avoidance
+COST_DYNAMIC_WEIGHT = 1.0    # λ3, dynamic feasibility
+COST_LOCAL_TARGET_WEIGHT = 5.0  # λ4, local target tracking
 
-# === Collision Avoidance ===
-SF = 0.5  # Safety clearance (meters)
-TRAJECTORY_RADIUS = 0.5  # Collision check radius for trajectory tube
+# Local target cost params (Eq. 18)
+LOCAL_TARGET_POS_WEIGHT = 1.0    # λp, position deviation weight
+LOCAL_TARGET_VEL_WEIGHT = 0.5    # λv, velocity deviation weight
 
-# === Voxel Grid ===
-VOXEL_RES = 0.2  # Voxel resolution (meters)
-GRID_HALF_X = 15  # Half grid size in X (total 30m)
-GRID_HALF_Y = 15  # Half grid size in Y (total 30m)
-GRID_HALF_Z = 5  # Half grid size in Z (total 10m)
-MAX_DEPTH = 20.0  # Maximum depth sensor range (meters)
-MAX_LIDAR_RANGE = 20.0  # Maximum LiDAR range (meters)
+# Voxel grid
+VOXEL_RESOLUTION = 0.2       # m, voxel size
+VOXEL_GRID_SIZE = 50         # grid size in each dimension (cells)
 
-# === A* Parameters ===
-ASTAR_HEURISTIC_WEIGHT = 1.0
-ASTAR_NEIGHBORHOOD = 26  # 6 or 26 connected
+# ============== RSPG Algorithm ==============
+RSPG_GAMMA = 0.99            # discount factor
+RSPG_LR = 0.01               # Adam learning rate
+RSPG_TAU = 0.01              # target network soft update rate
+RSPG_REPLAY_BUFFER = 100000  # replay buffer capacity
+RSPG_BATCH_SIZE = 256        # batch size for sampling
+RSPG_MAX_HISTORY = 100       # max LSTM unroll length
+RSPG_GRAD_CLIP = 1.0         # gradient clipping norm
+RSPG_ENTROPY_ALPHA_INIT = 8.0  # initial entropy coefficient α
+RSPG_ALPHA_LR = 0.0003       # learning rate for entropy coefficient
+RSPG_TARGET_ENTROPY = -3.0   # target entropy for automatic alpha tuning
 
-# === Time Reallocation ===
-TIME_REALLOCATION_MARGIN = 1.2  # Safety margin for time reallocation
+# ============== Observation Space ==============
+OBS_DIM_IMU = 2              # [yaw, pitch]
+OBS_DIM_RANGE = 25           # 5x5 rangefinder grid
+OBS_DIM_TARGET = 4           # relative position (3) + distance (1)
+OBS_DIM = OBS_DIM_IMU + OBS_DIM_RANGE + OBS_DIM_TARGET  # = 31
 
-# === Curve Fitting ===
-FITTING_AXIS_RATIO = 5.0  # b/a ratio for anisotropic fitting (radial vs axial)
-FITTING_A = 1.0  # Semi-major axis (axial direction)
-FITTING_B = 0.2  # Semi-minor axis (radial direction)
+# Rangefinder config
+RANGE_MAX = 10.0             # m, max rangefinder range
+RANGE_HFOV = 90.0            # degrees, horizontal FOV
+RANGE_VFOV = 60.0            # degrees, vertical FOV
+RANGE_RAYS_H = 5             # horizontal rays
+RANGE_RAYS_V = 5             # vertical rays
 
-# === Environment ===
-MAX_STEPS = 200  # Max steps per episode
-ARRIVAL_RADIUS = 1.5  # Goal arrival radius (meters)
-HEIGHT_MIN = -50.0  # Minimum height (NED frame, -50 = 50m up)
-HEIGHT_MAX = 0.5  # Maximum height (NED frame, close to ground)
-DT_AIRSIM = 0.5  # AirSim step duration (seconds)
-REPLAN_EVERY = 5  # Replan every N AirSim steps
+# ============== Action Space ==============
+ACTION_DIM = 6               # [x, y, z, φ, θ, ψ] local target
+ACTION_POS_MIN = 1.0         # m, min local target distance
+ACTION_POS_MAX = 5.0         # m, max local target distance
 
-# === AirSim ===
-AIRSIM_IP = "127.0.0.1"
-VEHICLE_NAME_DEFAULT = "Drone1"
-TAKEOFF_HEIGHT = 3.0
+# ============== Reward ==============
+REWARD_SIGMA = 2.0           # obstacle penalty decay σ
+REWARD_BETA = 25.0           # distance reward scale β
 
-# === Dataset ===
-DATASET_CSV = "relative_coordinates_export.csv"
+# ============== Training ==============
+TRAIN_EPISODES = 200         # total training episodes
+TRAIN_MAX_STEPS = 500        # max steps per episode
+TRAIN_SAVE_INTERVAL = 10     # save model every N episodes
+TRAIN_LOG_INTERVAL = 1       # log metrics every N episodes
+TRAIN_SEED = 42              # random seed
 
-# === Observation ===
-DEPTH_HEIGHT = 9
-DEPTH_WIDTH = 16
-LIDAR_DIM = 105
-KINEMATICS_DIM = 10
-PLANNER_INFO_DIM = 4  # traj_length, collision_count, feasibility_ratio, replan_count
+# ============== Paths ==============
+MODEL_SAVE_DIR = "models/saved_models"
+LOG_DIR = "logs"
