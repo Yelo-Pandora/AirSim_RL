@@ -5,7 +5,7 @@ import numpy as np
 from uav_env.uav_nav_env import UAVNavEnv
 from models.drqn import DRQN
 
-MODEL_PATH = "models/saved_models/dqn_ep0.pth"
+MODEL_PATH = "models/saved_models/drqn_ep30.pth"
 MAX_STEPS = 20000
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
