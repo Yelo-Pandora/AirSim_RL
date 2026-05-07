@@ -3,15 +3,22 @@ import math
 import csv
 import random
 import os
-import torch.nn.functional as F
 import gymnasium as gym
 import numpy as np
 import airsim
 import time
-import cv2
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from deep_network import LDTED3FeatureExtractor
+from preprocessing_utils import (
+    decode_depth_planar,
+    resize_depth_for_ldtd3,
+    downsample_depth_minpool,
+    lidar_points_to_360,
+    downsample_lidar_105,
+    action_to_acceleration,
+    integrate_velocity_with_acceleration,
+)
 
 # 基于特征提取的网络自定义 SB3 要用到的特征提取器
 class CustomCombinedExtractor(BaseFeaturesExtractor):
@@ -59,6 +66,7 @@ class AirSimUAVEnv(gym.Env):
             print(f"警告：未找到或未能读取 {self.positions_file}，使用默认测试位置。")
 
 
+
         # 参数初始化
         # 动作空间: 3维连续加速度
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
@@ -99,9 +107,60 @@ class AirSimUAVEnv(gym.Env):
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
         self.start_dist = float(np.linalg.norm(self.start_rel_pos))                 # 起点与终点的距离
         self.dt = 0.5                                                               # 步长时间
+        self.accel_scale = 2.0                                                      # 让 action=1 在 0.5s 步长下不再只产生 0.5 的单步速度增量
         self.waypoints = []                                                         # 设置的中途点的坐标
-        self.current_wp_idx = 0                                                     # 当前步前经过的中途点的索引（经过中途点那一步才有用）
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)                # 15个中间点 + 1个终点
+        self.current_yaw_deg = 0.0
+        self.last_commanded_yaw_deg = 0.0
+        self.yaw_align_speed_on = 0.2
+        self.yaw_align_speed_off = 0.1
+        self.max_yaw_step_deg = 20.0
+        self.depth_norm_max = 20.0
+        self.lidar_norm_max = 20.0
+        self.position_norm_max = 80.0
+        self.velocity_norm_max = 10.0
+        self.angular_acc_norm_max = 10.0
+        self.vertical_distance_norm_max = 40.0
+        #目的地可视化开关
+        self.visualize_goal = False
+        # 飞行轨迹可视化开关
+        self.visualize_traj = False
+
+        # 显示用整体上移高度，单位：米
+        # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高
+        self.visual_z_offset = 20.0
+
+        self.traj_points = []
+        self.traj_refresh_interval = 1
+        self.traj_duration = 0.8
+        self.traj_thickness = 6.0
+
+        # 标记刷新间隔。你的 dt=0.5，所以每 1 步刷新一次即可
+        self.marker_refresh_interval = 1
+
+        # 标记持续时间，略大于 dt，防止闪烁
+        self.marker_duration = 0.8
+        # 终点判定半径，你 step() 里现在是 dis2goal < 1.5
+        self.goal_radius = 1.5
+
+        # 是否显示 16 个航点
+        self.visualize_waypoints = False
+        self.show_goal_text = False
+
+    def _normalize_depth_obs(self, depth_tensor):
+        return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
+
+    def _normalize_lidar_obs(self, lidar_tensor):
+        return torch.clamp(lidar_tensor / self.lidar_norm_max, 0.0, 1.0)
+
+    def _normalize_kinematics_obs(self, kin_data):
+        kin = kin_data.astype(np.float32).copy()
+        kin[0:3] = np.clip(kin[0:3] / self.position_norm_max, -1.0, 1.0)
+        kin[3] = np.clip(kin[3] / self.position_norm_max, 0.0, 1.0)
+        kin[4:7] = np.clip(kin[4:7] / self.velocity_norm_max, -1.0, 1.0)
+        kin[7] = np.clip(kin[7] / self.angular_acc_norm_max, 0.0, 1.0)
+        kin[8:10] = np.clip(kin[8:10] / self.vertical_distance_norm_max, 0.0, 1.0)
+        return kin
 
 
     # 深度图下采样函数
@@ -109,10 +168,7 @@ class AirSimUAVEnv(gym.Env):
         """
         根据论文公式(1)，对 144x256 的深度图进行 16x16 的下采样，取最小值。
         """
-        # 使用 PyTorch 的 max_pool2d 实现 min_pooling (取负数再取最大)
-        depth_tensor = torch.from_numpy(depth_img).unsqueeze(0).unsqueeze(0).float()
-        downsampled = -F.max_pool2d(-depth_tensor, kernel_size=16, stride=16)
-        return downsampled  # 输出尺寸 [1, 1, 9, 16]
+        return downsample_depth_minpool(depth_img)
 
 
     # 激光雷达数据获取与处理
@@ -132,23 +188,9 @@ class AirSimUAVEnv(gym.Env):
 
         if lidar_data is None or len(lidar_data.point_cloud) < 3:
             # 如果依然失败或点云为空，返回默认的最大距离 (例如 20.0)
-            return np.ones(360) * 20.0
+            return np.ones(360, dtype=np.float32) * 20.0
 
-        # 将点云转换为距离数据 (极坐标)
-        points = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
-        # 计算每个点到无人机的距离
-        dists = np.linalg.norm(points, axis=1)
-        # 计算每个点的水平角度 (0-360)
-        angles = np.arctan2(points[:, 1], points[:, 0]) * 180 / np.pi
-        angles = (angles + 90) % 360
-
-        # 简单处理：将360度划分为360个bin，取每个bin内的最小值
-        lidar_360 = np.ones(360) * 20.0 # 默认最大距离20m
-        for i in range(len(dists)):
-            angle_idx = int(angles[i]) % 360
-            if dists[i] < lidar_360[angle_idx]:
-                lidar_360[angle_idx] = dists[i]
-        return lidar_360
+        return lidar_points_to_360(lidar_data.point_cloud)
 
 
     # 激光雷达下采样函数
@@ -163,18 +205,31 @@ class AirSimUAVEnv(gym.Env):
         注意：此处的 LiDAR 配置为水平 360° 全景雷达 (-180° 到 180°)，
         返回的 lidar_data 是经过 360 个角度 bin 聚合后的最小距离数组。
         """
-        # lidar_data 是 360 度的原始距离数据
-        indices = []
-        # 前方
-        indices.extend(range(45, 135, 2))
-        # 前侧方
-        indices.extend(range(0, 45, 3))
-        indices.extend(range(135, 180, 3))
-        # 后方
-        indices.extend(range(180, 360, 6))
+        return downsample_lidar_105(lidar_data)
 
-        downsampled = lidar_data[indices]
-        return torch.from_numpy(downsampled).float()
+
+
+    @staticmethod
+    def _wrap_angle_deg(angle_deg):
+        return ((angle_deg + 180.0) % 360.0) - 180.0
+
+    def _compute_soft_aligned_yaw_deg(self, target_vel):
+        # yaw 对齐的是积分后的期望水平速度方向，而不是 raw action 本身。
+        speed_xy = float(np.linalg.norm(target_vel[:2]))
+        commanded_yaw = float(self.last_commanded_yaw_deg)
+
+        if speed_xy >= self.yaw_align_speed_on:
+            desired_yaw_deg = math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0])))
+        elif speed_xy <= self.yaw_align_speed_off:
+            desired_yaw_deg = commanded_yaw
+        else:
+            desired_yaw_deg = commanded_yaw
+
+        yaw_delta = self._wrap_angle_deg(desired_yaw_deg - float(self.current_yaw_deg))
+        yaw_delta = float(np.clip(yaw_delta, -self.max_yaw_step_deg, self.max_yaw_step_deg))
+        commanded_yaw = self._wrap_angle_deg(float(self.current_yaw_deg) + yaw_delta)
+        self.last_commanded_yaw_deg = commanded_yaw
+        return commanded_yaw
 
 
     # 获取环境需要的信息的函数，包括状态向量和一些判别信息
@@ -186,12 +241,12 @@ class AirSimUAVEnv(gym.Env):
         ], vehicle_name=self.vehicle_name)
         # 成功获取到深度图
         if responses and responses[0].width > 0:
-            raw_depth = np.array(responses[0].image_data_float).reshape(responses[0].height, responses[0].width)
+            raw_depth = decode_depth_planar(responses[0])
             # 将获取到的深度图通过下采样变维到 256*144 大小
-            raw_depth = cv2.resize(raw_depth, (256, 144))
+            raw_depth = resize_depth_for_ldtd3(raw_depth)
         # 没获取到深度图，基于一个默认值
         else:
-            raw_depth = np.ones((144, 256)) * 20.0
+            raw_depth = np.ones((144, 256), dtype=np.float32) * 20.0
 
 
         # 获取激光雷达数据
@@ -203,8 +258,10 @@ class AirSimUAVEnv(gym.Env):
         state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         # 无人机的当前的绝对位置
         pos = state.kinematics_estimated.position
-        # 无人机当前的目的地
+        # 无人机当前的朝向
         orient = state.kinematics_estimated.orientation
+        _, _, yaw_rad = airsim.to_eularian_angles(orient)
+        self.current_yaw_deg = self._wrap_angle_deg(math.degrees(yaw_rad))
         # 无人机当前的线速度
         vel = state.kinematics_estimated.linear_velocity
         # 无人机当前的角加速度
@@ -245,66 +302,42 @@ class AirSimUAVEnv(gym.Env):
             dis_z_bottom,
             dis_z_top
         ], dtype=np.float32)
-        # 保存当前绝对坐标和速度供 step 方法使用，减少 API 调用
-        self.current_position = drone_pos
+        # 保存原始物理量，step/reset 中的奖励、终止和位置推导都必须使用未归一化数据。
+        self.current_rel_pos = rel_pos.astype(np.float32)
+        self.current_dis2goal = float(dis2goal)
         self.current_velocity = velocity
+        self.current_angular_acc = float(angular_acc_mag)
+        self.current_dis_z_bottom = float(dis_z_bottom)
+        self.current_dis_z_top = float(dis_z_top)
 
+        depth_obs = self._normalize_depth_obs(self.downsample_depth(raw_depth)).squeeze(0).cpu().numpy()
+        lidar_obs = self._normalize_lidar_obs(self.downsample_lidar(raw_lidar)).cpu().numpy()
+        kin_obs = self._normalize_kinematics_obs(kin_data)
 
         return {
-            "depth": self.downsample_depth(raw_depth).squeeze(0).cpu().numpy(),
-            "lidar": self.downsample_lidar(raw_lidar).cpu().numpy(),
-            "kinematics": kin_data
+            "depth": depth_obs,
+            "lidar": lidar_obs,
+            "kinematics": kin_obs
         }
 
     def step(self, action):
         self.step_count += 1
 
-        # 运动控制：利用上一步缓存的速度进行矢量计算，该公式中的 current_velocity 其实是上一步的速度
-        # action 是 [-1, 1] 之间的 3 维向量
-        target_vel = self.current_velocity + (action * 1.0) * self.dt
-        # 限制最大速度 (保持在合理范围内)
-        max_v = 10.0
-        # 计算当前步的速度
-        v_mag = np.linalg.norm(target_vel)
-        # 如果速度过大，则裁剪速度
-        if v_mag > max_v:
-            target_vel = (target_vel / v_mag) * max_v
+        # 动作先映射为加速度命令，再在一个 RL 控制周期内积分成末端目标速度。
+        commanded_accel = action_to_acceleration(action, accel_scale=self.accel_scale)
+        target_vel = integrate_velocity_with_acceleration(
+            self.current_velocity,
+            commanded_accel,
+            dt=self.dt,
+            max_v=10.0,
+        )
 
 
-        # # 2. 核心修复：计算期望的偏航角 (Yaw)，让机头指向速度方向
-        # # 只要水平速度不为 0，就计算偏航角
-        # if np.linalg.norm([target_vel[0], target_vel[1]]) > 0.1:
-        #     # np.arctan2(y, x) 返回的是弧度
-        #     target_yaw_rad = math.atan2(target_vel[1], target_vel[0])
-        #     target_yaw_deg = math.degrees(target_yaw_rad)
-        # else:
-        #     # 如果速度很小（悬停），保持当前朝向
-        #     state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-        #     _, _, target_yaw_rad = airsim.to_eularian_angles(state.kinematics_estimated.orientation)
-        #     target_yaw_deg = math.degrees(target_yaw_rad)
-        #
-        # # 3. 使用带有 YawMode 的 API 发送指令
-        # # is_rate=False 表示 target_yaw_deg 是绝对角度，不是角速度
-        # yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=target_yaw_deg)
-        #
-        # self.client.moveByVelocityAsync(
-        #     float(target_vel[0]),
-        #     float(target_vel[1]),
-        #     float(target_vel[2]),
-        #     float(self.dt)*1.1,
-        #     drivetrain=airsim.DrivetrainType.ForwardOnly,  # 强制机头朝向运动方向
-        #     yaw_mode=yaw_mode,
-        #     vehicle_name=self.vehicle_name
-        # )
-        #
-        #
-        # try:
-        #     self.client.ping()
-        # except:
-        #     pass
-        #
-        # time.sleep(self.dt)
-
+        # AirSim 边界仍复用速度接口，但这里的 target_vel 已经来自加速度语义积分。
+        yaw_mode = airsim.YawMode(
+            is_rate=False,
+            yaw_or_rate=float(self._compute_soft_aligned_yaw_deg(target_vel)),
+        )
 
         # 取消 join() 阻塞，直接发送指令。
         self.client.moveByVelocityAsync(
@@ -312,6 +345,8 @@ class AirSimUAVEnv(gym.Env):
             float(target_vel[1]),
             float(target_vel[2]),
             float(self.dt),
+            drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+            yaw_mode=yaw_mode,
             vehicle_name=self.vehicle_name
         )
 
@@ -324,22 +359,25 @@ class AirSimUAVEnv(gym.Env):
         time.sleep(self.dt)
         # [统一调用] 在动作执行完后，统一调用一次 _get_obs() 获取所有最新数据
         obs = self._get_obs()
-        kin = obs["kinematics"]
 
 
-        # 获取动作执行后的无人机信息
-        rel_pos = kin[0:3]
-        dis2goal = kin[3]
-        velocity = kin[4:7]
-        angular_acc = kin[7]
-        dis_z_bottom = kin[8]
-        dis_z_top = kin[9]
+        # 获取动作执行后的无人机信息。这里必须使用 _get_obs 缓存的原始物理量，而不是归一化后的网络观测。
+        rel_pos = self.current_rel_pos.copy()
+        dis2goal = self.current_dis2goal
+        velocity = self.current_velocity.copy()
+        angular_acc = self.current_angular_acc
+        dis_z_bottom = self.current_dis_z_bottom
+        dis_z_top = self.current_dis_z_top
         progress = self.last_dis2goal - dis2goal
         self.last_dis2goal = dis2goal  # 更新记忆
         # 在 _get_obs() 中: rel_pos = target - drone_pos
         # 逆向推导无人机位置，省去 getMultirotorState 调用
         drone_pos = self.current_target - rel_pos
+        #每走一步，就把当前位置加到轨迹里，并定期重画
+        self.traj_points.append(drone_pos.copy())
 
+        if self.visualize_traj and self.step_count % self.traj_refresh_interval == 0:
+            self._draw_trajectory()
 
         # 检查航点经过逻辑
         passed_waypoint_id = 0
@@ -372,6 +410,7 @@ class AirSimUAVEnv(gym.Env):
             perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
             crossed_border = bool(perpendicular_dist > 7.0)
         else:
+            perpendicular_dist = 0.0
             crossed_border = False
         # 添加一个飞行限高，当无人机飞出指定高度直接结束回合
         out_of_ceiling = bool(drone_pos[2] < -50.0)
@@ -391,21 +430,185 @@ class AirSimUAVEnv(gym.Env):
             'dis_z_bottom': dis_z_bottom,
             'dis_z_top': dis_z_top,
             'angular_acc': angular_acc,
-            'v_magnitude': v_magnitude
+            'v_magnitude': v_magnitude,
+            'perpendicular_dist': perpendicular_dist,
         }
         # 收尾部分
         reward = self._calculate_reward(info)
         terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
         self._render_dashboard(action, drone_pos, velocity, reward, terminated, truncated, info)
-
+        if self.visualize_goal and self.step_count % self.marker_refresh_interval == 0:
+            self._draw_goal_marker()
 
         return obs, reward, terminated, truncated, info
+
+    def _airsim_vec(self, arr, visual_offset=True):
+        """
+        numpy/list -> AirSim Vector3r
+
+        visual_offset=True 时，只把显示用的点、线、轨迹整体向上抬高；
+        不改变 current_target、current_start_pos、reward、dis2goal 等真实训练逻辑。
+        """
+        z = float(arr[2])
+
+        if visual_offset:
+            # AirSim / Colosseum 是 NED 坐标，z 减小表示向上
+            z -= float(self.visual_z_offset)
+
+        return airsim.Vector3r(
+            float(arr[0]),
+            float(arr[1]),
+            z
+        )
+
+    def _clear_visual_markers(self):
+        try:
+            self.client.simFlushPersistentMarkers()
+        except Exception as e:
+            print(f"[Marker Warning] 清除持久标记失败: {e}")
+
+    def _draw_goal_marker(self):
+        """
+        用非持久化方式绘制当前回合的终点标记。
+        旧标记会自动过期，不会跨 episode 残留。
+        """
+        if not self.visualize_goal:
+            return
+
+        try:
+            duration = float(self.marker_duration)
+
+            target = self._airsim_vec(self.current_target)
+            start = self._airsim_vec(self.current_start_pos)
+
+            # 起点绿色点
+            self.client.simPlotPoints(
+                [start],
+                color_rgba=[0.0, 1.0, 0.0, 1.0],
+                size=20.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 终点红色点
+            self.client.simPlotPoints(
+                [target],
+                color_rgba=[1.0, 0.0, 0.0, 1.0],
+                size=35.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 起点到终点的参考线
+            self.client.simPlotLineStrip(
+                [start, target],
+                color_rgba=[0.0, 0.6, 1.0, 1.0],
+                thickness=4.0,
+                duration=duration,
+                is_persistent=False
+            )
+
+            # 终点判定圆圈
+            self._draw_goal_circle(duration)
+
+            # 航点
+            if hasattr(self, "waypoints") and self.waypoints:
+                waypoint_points = [self._airsim_vec(wp) for wp in self.waypoints]
+                self.client.simPlotPoints(
+                    waypoint_points,
+                    color_rgba=[1.0, 0.5, 0.0, 1.0],
+                    size=10.0,
+                    duration=duration,
+                    is_persistent=False
+                )
+
+            # 文字不要永久显示
+            if self.show_goal_text:
+                self.client.simPlotStrings(
+                    ["GOAL"],
+                    [
+                        airsim.Vector3r(
+                            float(self.current_target[0]),
+                            float(self.current_target[1]),
+                            float(self.current_target[2]) - float(self.visual_z_offset) - 2.0
+                        )
+                    ],
+                    scale=2.5,
+                    color_rgba=[1.0, 0.0, 0.0, 1.0],
+                    duration=duration
+                )
+
+        except Exception as e:
+            print(f"[Marker Warning] 绘制终点标记失败: {e}")
+
+    def _draw_goal_circle(self, duration):
+        circle_points = []
+        radius = float(self.goal_radius)
+
+        for i in range(65):
+            theta = 2.0 * math.pi * i / 64.0
+            x = float(self.current_target[0]) + radius * math.cos(theta)
+            y = float(self.current_target[1]) + radius * math.sin(theta)
+
+            # 显示用圆圈整体向上抬高
+            z = float(self.current_target[2]) - float(self.visual_z_offset)
+
+            circle_points.append(airsim.Vector3r(x, y, z))
+
+        self.client.simPlotLineStrip(
+            circle_points,
+            color_rgba=[1.0, 1.0, 0.0, 1.0],
+            thickness=4.0,
+            duration=duration,
+            is_persistent=False
+        )
+    def _draw_waypoint_markers(self):
+        """
+        绘制 reset() 中生成的 16 个等间距航点。
+        """
+        if not self.waypoints:
+            return
+
+        waypoint_points = [self._airsim_vec(wp) for wp in self.waypoints]
+
+        self.client.simPlotPoints(
+            waypoint_points,
+            color_rgba=[1.0, 0.5, 0.0, 1.0],
+            size=12.0,
+            duration=-1.0,
+            is_persistent=True
+        )
+
+
+    def _draw_trajectory(self):
+        if not self.visualize_traj:
+            return
+
+        if len(self.traj_points) < 2:
+            return
+
+        try:
+            # 轨迹只在显示上整体上移，不改变真实无人机位置
+            airsim_points = [
+                self._airsim_vec(p, visual_offset=True)
+                for p in self.traj_points
+            ]
+
+            self.client.simPlotLineStrip(
+                airsim_points,
+                color_rgba=[0.0, 1.0, 0.0, 1.0],
+                thickness=self.traj_thickness,
+                duration=self.traj_duration,
+                is_persistent=False
+            )
+        except Exception as e:
+            print(f"[Trajectory Warning] 绘制轨迹失败: {e}")
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0
-
+        self.traj_points = []
         # 如果 options 中没有指定具体的 target，则从数据集中随机选一个
         options = options or {}
         if "start_pos" in options and "target" in options:
@@ -419,14 +622,15 @@ class AirSimUAVEnv(gym.Env):
         self.current_start_pos = np.array(start_pos, dtype=np.float32)
         self.current_target = np.array(target_pos, dtype=np.float32)
         # 重置airsim环境
+        self._clear_visual_markers()
         self.client.reset()
         self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
         self.client.armDisarm(True, vehicle_name=self.vehicle_name)
-
+        self._clear_visual_markers()
         # 传送无人机
         # 在 AirSim 中，Z轴负方向是向上。
         # 当设置为 -2.0 时，指的是“相对于出生点向上 2 米”
-        start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10.0
+        start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10
         self.current_start_pos[2] = start_z
         # 计算起点到终点的二维方向，获取初始偏航角(Yaw)
         direction = self.current_target - self.current_start_pos
@@ -434,8 +638,9 @@ class AirSimUAVEnv(gym.Env):
             initial_yaw_rad = math.atan2(direction[1], direction[0])
         else:
             initial_yaw_rad = 0.0
-        # 记录初始的偏航角（角度制），供 step() 方法锁定朝向使用
-        self.init_yaw_deg = math.degrees(initial_yaw_rad)
+        initial_yaw_deg = math.degrees(initial_yaw_rad)
+        self.current_yaw_deg = initial_yaw_deg
+        self.last_commanded_yaw_deg = initial_yaw_deg
         pose = airsim.Pose(
             airsim.Vector3r(float(start_pos[0]), float(start_pos[1]), start_z),
             airsim.to_quaternion(0.0, 0.0, initial_yaw_rad),
@@ -447,27 +652,6 @@ class AirSimUAVEnv(gym.Env):
         self.client.moveByVelocityAsync(0, 0, 0, 1, vehicle_name=self.vehicle_name)
         time.sleep(1.0) # 延长重置等待时间，确保飞机被稳稳托在空中
 
-
-        # 计算从起点指向终点的单位方向向量
-        direction = self.current_target - self.current_start_pos
-        dist = float(np.linalg.norm(direction))
-        if dist > 1e-5:
-            unit_dir = direction / dist
-        else:
-            unit_dir = np.zeros(3, dtype=np.float32)
-        # 期望的初始加速度为 1.0 m/s^2，转化为初始状态的单步速度 (v = a * dt)
-        initial_accel = 1.0
-        initial_vel = unit_dir * initial_accel * self.dt
-        # 让无人机以该初始速度启动，提供一个飞向目标的初始动量，而不是死板地悬停在原地
-        self.client.moveByVelocityAsync(
-            float(initial_vel[0]),
-            float(initial_vel[1]),
-            float(initial_vel[2]),
-            0.5,  # 持续 1 秒，建立稳定的初始物理惯性
-            vehicle_name=self.vehicle_name
-        )
-        time.sleep(1.0)  # 等待物理状态稳定
-
         # 生成 16 个等间距航点 (15个中间点 + 1个终点)
         self.waypoints = []
         for i in range(1, 17):
@@ -476,11 +660,13 @@ class AirSimUAVEnv(gym.Env):
             wp = self.current_start_pos + (self.current_target - self.current_start_pos) * ratio
             self.waypoints.append(wp)
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)
+        # 绘制当前回合的终点、起点、航点和参考路径
+        self._draw_goal_marker()
 
 
+        # reset 后不再注入额外初速度，首拍运动完全交给策略动作决定。
         obs = self._get_obs()
-        kin = obs["kinematics"]
-        self.start_rel_pos = kin[0:3].copy()
+        self.start_rel_pos = self.current_rel_pos.copy()
 
         # 使用目标和起点的绝对距离来计算 start_dist
         # 防止 kin[0:3] 相对坐标原点偏差导致 D 计算过小
@@ -494,38 +680,44 @@ class AirSimUAVEnv(gym.Env):
 
     def _calculate_reward(self, info):
         """按照论文公式 (2)-(14) 实现"""
-        r_progress = 15.0 * info.get('progress', 0.0)
+        progress = info.get('progress', 0.0)
+        r_progress = 25.0 * progress
+
         # R_path (公式 8)
         # 接近程度奖励
         r_proximity = 40 * (info.get('passed_waypoint', 0) / 15) if info.get('is_first_arrival', False) else 0
         # 到达奖励
         r_arrive = 500 if info['arrived'] else 0
-        # 步数奖励（实际上是距离奖励）
+
         d = info['dis2goal']
-        D = self.start_dist
+        D = max(self.start_dist, 1.0)
+        # 步数奖励（实际上是距离奖励）
         if d > D:
             r_step = -0.2 * (d / D)
         elif 3 <= d <= D:
             r_step = -0.01 * d
         else:
             r_step = -0.03
+
         # Direction奖励
         a_abs = abs(info['angle_to_target'])
         if a_abs < 10:
-            r_direction = 0.05
+            r_direction = 0.3
         elif 10 <= a_abs < 30:
-            r_direction = -0.2 * (a_abs / 180.0)
+            r_direction = 0.1
         elif 30 <= a_abs < 45:
-            r_direction = -0.3 * (a_abs / 180.0)
+            r_direction = -0.2 * (a_abs / 180.0)
         else:
             r_direction = -0.5 * (a_abs / 180.0)
-        # border奖励
+
+        # 保持原有 crossed_border 终止/惩罚机制，不在这里加入连续偏航越界惩罚。
         r_border = -400 if info['crossed_border'] else 0
         r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border
+
         # R_collision (公式 11)
         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
-        dis_z_bottom = info['dis_z_bottom']  # 离地面障碍物距离
-        dis_z_top = info['dis_z_top']       # 距离上方障碍物的距离
+        dis_z_bottom = info['dis_z_bottom']
+        dis_z_top = info['dis_z_top']
         # 与地面障碍物距离定义的奖励
         if 0.5 <= dis_z_bottom < 1:
             r_z_bottom = -0.05
@@ -563,14 +755,14 @@ class AirSimUAVEnv(gym.Env):
 
         r_survival = 0.5 if not (info['collision'] or info.get('out_of_ceiling', False)) else 0.0
 
-        return r_path + r_collision + r_stabilization +r_survival
+        return r_progress + r_path + r_collision + r_stabilization + r_survival
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """
         在终端实时格式化输出无人机飞行状态仪表盘
         """
-        # 实际使用的加速度 (对应 target_vel 的更新)
-        actual_acc = action * 1.0
+        # 实际使用的加速度命令
+        actual_acc = action_to_acceleration(action)
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
         print(f"\r[Step {self.step_count:4d}] "
