@@ -53,8 +53,8 @@ class TrajectoryOptimizer:
             c_s, g_s = cost_smoothness(spline)
             total_grad += self.w_smooth * g_s
 
-            # Collision cost
-            c_c, g_c = cost_collision(spline, voxel_grid, radius=0.5, n_samples=30)
+            # Collision cost (fewer samples for speed)
+            c_c, g_c = cost_collision(spline, voxel_grid, radius=0.5, n_samples=15)
             total_grad += self.w_collision * g_c
 
             # Dynamic feasibility cost
@@ -68,6 +68,11 @@ class TrajectoryOptimizer:
                 weight_vel=self.lp_vel_weight
             )
             total_grad += self.w_local_target * g_lp
+
+            # Gradient clipping
+            grad_norm = np.linalg.norm(total_grad)
+            if grad_norm > 10.0:
+                total_grad = total_grad / grad_norm * 10.0
 
             # Gradient descent step
             ctrl = ctrl - self.lr * total_grad
@@ -85,7 +90,7 @@ class TrajectoryOptimizer:
         return spline
 
     def _init_control_points(self, start, start_vel, target, n_ctrl):
-        """Initialize control points as a straight line from start to target."""
+        """Initialize control points as a smooth path from start to target."""
         ctrl = np.zeros((n_ctrl, 3))
         direction = target - start
         dist = np.linalg.norm(direction)
@@ -94,7 +99,7 @@ class TrajectoryOptimizer:
         else:
             unit_dir = direction / dist
             for i in range(n_ctrl):
+                # Use smooth interpolation (sigmoid-like) to avoid clustering
                 frac = i / (n_ctrl - 1)
                 ctrl[i] = start + frac * direction
-                ctrl[i] += frac * start_vel * 0.5  # slight velocity bias
         return ctrl

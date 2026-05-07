@@ -27,6 +27,9 @@ def cost_collision(spline, voxel_grid, radius=0.5, n_samples=30):
     Uses the voxel grid for obstacle queries.
     Returns: (cost, gradient w.r.t. control_points)
     """
+    if not voxel_grid.obstacles:
+        return 0.0, np.zeros_like(spline.control_points)
+
     duration = spline.duration
     cost = 0.0
     ctrl_grad = np.zeros_like(spline.control_points)

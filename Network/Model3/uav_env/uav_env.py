@@ -2,8 +2,13 @@ import sys
 import os
 import numpy as np
 
-# Add Model2 to path for AirSimBridge reuse
-MODEL2_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Model2")
+# Add Model2 to path for AirSimBridge reuse.
+# __file__ = .../Network/Model3/uav_env/uav_env.py
+# We need to go up 3 levels to Network/, then into Model2/
+MODEL2_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "Model2",
+)
 if MODEL2_PATH not in sys.path:
     sys.path.insert(0, MODEL2_PATH)
 
@@ -49,6 +54,7 @@ class UAVRLOEnv:
         self.step_count = 0
         self.collision_count = 0
         self.trajectory = []
+        self.sim_obstacles = []  # Always initialized, used in both modes
 
     def _init_sim(self):
         """Initialize simple simulation state for offline testing."""
@@ -56,6 +62,24 @@ class UAVRLOEnv:
         self.sim_vel = np.array([1.0, 0.0, 0.0])
         self.sim_yaw = 0.0
         self.sim_obstacles = []
+
+    def _get_yaw_from_airsim(self):
+        """Extract yaw angle from AirSim client quaternion."""
+        import airsim
+        state = self.bridge.client.getMultirotorState()
+        q = state.kinematics_estimated.orientation
+        yaw = np.arctan2(
+            2 * (q.w_val * q.z_val + q.x_val * q.y_val),
+            1 - 2 * (q.y_val * q.y_val + q.z_val * q.z_val)
+        )
+        return yaw
+
+    def _check_collision_airsim(self):
+        """Check if UAV has collided."""
+        try:
+            return self.bridge.client.simGetCollisionInfo().has_collided
+        except Exception:
+            return False
 
     def reset(self, goal=None):
         """Reset environment for new episode."""
@@ -65,9 +89,9 @@ class UAVRLOEnv:
             self.bridge.client.armDisarm(True)
             self.bridge.takeoff()
             state = self.bridge.get_state()
-            self.current_pos = state["position"]
-            self.current_vel = state["velocity"]
-            self.current_yaw = state["orientation"][2] if "orientation" in state else 0.0
+            self.current_pos = state["position"].copy()
+            self.current_vel = state["velocity"].copy()
+            self.current_yaw = self._get_yaw_from_airsim()
         else:
             self.sim_pos = np.array([0.0, 0.0, -5.0])
             self.sim_vel = np.array([1.0, 0.0, 0.0])
@@ -124,7 +148,7 @@ class UAVRLOEnv:
         )
 
         # Check for collisions in planned trajectory
-        has_collision, collision_idx = self.planner.check_collision(spline)
+        has_collision, _ = self.planner.check_collision(spline)
         if has_collision:
             self.collision_count += 1
 
@@ -173,7 +197,7 @@ class UAVRLOEnv:
         """Get current observation vector."""
         if self.use_airsim:
             ray_distances = self._get_rangefinder_airsim()
-            orientation = self.bridge.get_state().get("orientation", np.zeros(3))
+            orientation = np.array([0.0, 0.0, self.current_yaw])
         else:
             ray_distances = self._get_rangefinder_sim()
             orientation = np.array([0.0, 0.0, self.sim_yaw])
@@ -186,23 +210,76 @@ class UAVRLOEnv:
         )
 
     def _get_rangefinder_airsim(self):
-        """Get rangefinder distances via AirSim line traces."""
-        distances = np.zeros(len(self.ray_directions))
-        origin = self.current_pos
+        """Get rangefinder distances via AirSim depth image + distance sensor fallback."""
+        import airsim
+
+        distances = np.full(len(self.ray_directions), config.RANGE_MAX)
+
+        # Try depth image first — extract distances in ray directions
         try:
-            for i, direction in enumerate(self.ray_directions):
-                end = origin + direction * config.RANGE_MAX
-                result = self.bridge.client.simCastRay(
-                    airsim.Vector3r(*origin.tolist()),
-                    airsim.Vector3r(*end.tolist()),
-                )
-                if result:
-                    distances[i] = result.distance
-                else:
-                    distances[i] = config.RANGE_MAX
+            responses = self.bridge.client.simGetImages([
+                airsim.ImageRequest("0", airsim.ImageType.DepthVis, True, False),
+                airsim.ImageRequest("0", airsim.ImageType.DepthPerspective, True, True),
+            ])
+            for resp in responses:
+                if resp.height > 0 and resp.width > 0:
+                    # DepthPerspective returns raw float depth in meters
+                    depth_1d = np.frombuffer(resp.image_data_float, dtype=np.float32)
+                    depth_2d = depth_1d.reshape(resp.height, resp.width)
+                    distances = self._extract_ray_distances_from_depth(depth_2d, self.ray_directions)
+                    return distances
         except Exception as e:
-            print(f"[WARN] Rangefinder error: {e}")
-            distances[:] = config.RANGE_MAX
+            print(f"[WARN] Depth image failed: {e}")
+
+        # Fallback: try distance sensor if configured in settings.json
+        try:
+            ds = self.bridge.client.getDistanceSensorData()
+            if ds.distance < 1e5:  # Valid reading
+                distances[:] = ds.distance
+        except Exception:
+            print(f"[WARN] Distance sensor not configured in settings.json")
+            print("[WARN] Using max range for all rays — add a Distance sensor to settings.json")
+
+        return distances
+
+    def _extract_ray_distances_from_depth(self, depth_image, ray_directions):
+        """
+        Extract distance in each ray direction from a depth image.
+        depth_image: (H, W) array in meters
+        ray_directions: (N, 3) array in camera frame
+        """
+        import airsim
+
+        h, w = depth_image.shape
+        distances = np.full(len(ray_directions), config.RANGE_MAX)
+
+        # Get camera info
+        try:
+            camera_info = self.bridge.client.simGetCameraInfo(
+                "0", vehicle_name="", image_type=airsim.ImageType.Scene
+            )
+            fx = camera_info.proj_mat[0]
+            fy = camera_info.proj_mat[5]
+            cx = w / 2.0
+            cy = h / 2.0
+        except Exception:
+            # Default FOV ~90 degrees
+            fx = fy = w / 2.0
+            cx = cy = w / 2.0
+
+        # Sample depth along each ray direction
+        for i, direction in enumerate(ray_directions):
+            # Project ray direction to pixel coordinates
+            # direction is in body frame, assume camera points forward (x-axis)
+            if direction[0] <= 0:
+                continue  # Ray pointing backward, skip
+            pixel_x = int(cx + (direction[1] / direction[0]) * fx)
+            pixel_y = int(cy + (direction[2] / direction[0]) * fy)
+            if 0 <= pixel_x < w and 0 <= pixel_y < h:
+                d = depth_image[pixel_y, pixel_x]
+                if 0 < d < config.RANGE_MAX:
+                    distances[i] = d
+
         return distances
 
     def _get_rangefinder_sim(self):
@@ -212,7 +289,6 @@ class UAVRLOEnv:
 
         for i, direction in enumerate(self.ray_directions):
             for obstacle_pos, obstacle_radius in self.sim_obstacles:
-                # Ray-sphere intersection
                 oc = origin - obstacle_pos
                 a = np.dot(direction, direction)
                 b = 2 * np.dot(oc, direction)
@@ -236,32 +312,50 @@ class UAVRLOEnv:
 
     def _update_planner_from_sim(self):
         """Update planner voxel grid from simulation obstacles."""
-        # In sim mode, directly populate voxel grid with known obstacles
         self.planner.voxel_grid.clear()
         for obs_pos, obs_radius in self.sim_obstacles:
             self.planner.voxel_grid.mark_occupied_sphere(obs_pos, obs_radius)
 
     def _execute_trajectory_airsim(self, spline):
-        """Execute B-spline trajectory in AirSim."""
+        """Execute B-spline trajectory in AirSim using velocity commands."""
+        import airsim
+
         if spline is None:
             return
+
         duration = min(spline.duration, config.PLANNER_DT * 5)
         n_steps = max(int(duration / 0.05), 1)
+        max_speed = config.UAV_MAX_SPEED
 
         for i in range(n_steps):
             t = i / n_steps * duration
-            pos, vel = self.planner.get_control_command(t)
-            if pos is not None:
-                try:
-                    self.bridge.move_to_position(pos[0], pos[1], pos[2], velocity=config.UAV_MAX_SPEED)
-                except Exception:
-                    pass
+            target_pos, target_vel = self.planner.get_control_command(t)
+            if target_pos is None:
+                continue
 
-        # Update state
+            # Compute velocity toward target position
+            error = target_pos - self.current_pos
+            dist = np.linalg.norm(error)
+            if dist > 0.05:
+                vel_cmd = error / dist * min(dist * 2.0, max_speed)
+            else:
+                vel_cmd = np.zeros(3)
+
+            # Use body-frame velocity control
+            try:
+                self.bridge.client.moveByVelocityBodyFrameAsync(
+                    vx=float(vel_cmd[0]), vy=float(vel_cmd[1]),
+                    vz=float(vel_cmd[2]), duration=0.05,
+                    yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=0.0),
+                )
+            except Exception:
+                pass
+
+        # Update state from AirSim
         state = self.bridge.get_state()
-        self.current_pos = state["position"]
-        self.current_vel = state["velocity"]
-        self.current_yaw = state.get("orientation", np.zeros(3))[2]
+        self.current_pos = state["position"].copy()
+        self.current_vel = state["velocity"].copy()
+        self.current_yaw = self._get_yaw_from_airsim()
 
     def _execute_trajectory_sim(self, spline):
         """Execute B-spline trajectory in simple simulation."""
@@ -275,7 +369,6 @@ class UAVRLOEnv:
             t = i / n_steps * duration
             pos, vel = self.planner.get_control_command(t)
             if pos is not None:
-                # Check for collisions during movement
                 for obs_pos, obs_radius in self.sim_obstacles:
                     if np.linalg.norm(pos - obs_pos) < obs_radius + config.UAV_RADIUS:
                         self.collision_count += 1
@@ -283,7 +376,6 @@ class UAVRLOEnv:
 
                 self.sim_pos = pos.copy()
                 self.sim_vel = vel.copy() if vel is not None else np.zeros(3)
-                # Update yaw based on velocity direction
                 if np.linalg.norm(self.sim_vel[:2]) > 1e-3:
                     self.sim_yaw = np.arctan2(self.sim_vel[1], self.sim_vel[0])
 
@@ -293,19 +385,15 @@ class UAVRLOEnv:
 
     def _check_done(self, dist_to_goal):
         """Check if episode should terminate."""
-        # Arrived at goal
         if dist_to_goal < config.UAV_ARRIVE_DIST:
             return True, "arrived"
 
-        # Collision
         if self.collision_count >= 3:
             return True, "collision"
 
-        # Step limit
         if self.step_count >= config.TRAIN_MAX_STEPS:
             return True, "timeout"
 
-        # Out of bounds
         z = self.current_pos[2]
         if z > config.UAV_ALTITUDE_MIN or z < -config.UAV_ALTITUDE_MAX * 2:
             return True, "out_of_bounds"

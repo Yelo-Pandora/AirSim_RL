@@ -10,7 +10,7 @@ UAV_ARRIVE_DIST = 0.5        # m, goal arrival threshold
 # ============== EGO-Planner ==============
 PLANNER_HORIZON = 5.0        # m, trajectory planning horizon
 PLANNER_DT = 0.1             # s, control loop period
-PLANNER_OPTIM_ITERS = 50     # gradient descent iterations per planning step
+PLANNER_OPTIM_ITERS = 15     # gradient descent iterations per planning step
 PLANNER_LR = 0.1             # learning rate for trajectory optimization
 
 # B-spline parameters

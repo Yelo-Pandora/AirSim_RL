@@ -53,10 +53,25 @@ class BSpline:
         self.duration = self.knots[-1] - self.knots[0]
 
     def _uniform_knots(self):
+        """Create uniform knot vector with appropriate time scaling."""
+        # Scale dt based on control point spacing to keep velocities reasonable
+        # Compute approximate distance between consecutive control points
+        max_dist = 0.0
+        for i in range(len(self.control_points) - 1):
+            d = np.linalg.norm(self.control_points[i + 1] - self.control_points[i])
+            max_dist = max(max_dist, d)
+
+        # Adjust dt so that velocity ≈ max_dist/dt stays under ~5 m/s initially
+        # Use dt that gives reasonable initial velocity
+        if max_dist > 0:
+            adaptive_dt = max_dist / 3.0  # ~3 m/s initial speed
+        else:
+            adaptive_dt = self.dt
+
         n = self.n_ctrl + 2 * self.order
         knots = np.zeros(n)
         for i in range(n):
-            knots[i] = max(0, i - self.order + 1) * self.dt
+            knots[i] = max(0, i - self.order + 1) * adaptive_dt
         return knots
 
     def eval(self, t):
