@@ -34,10 +34,18 @@ class UAVRLOEnv:
             from airsim_client.airsim_bridge import AirSimBridge
             self.bridge = AirSimBridge()
             self.use_airsim = True
+            # Detect vehicle name (same as Model1)
+            try:
+                vehicles = self.bridge.client.listVehicles()
+                self.vehicle_name = vehicles[0] if vehicles else "Drone1"
+            except Exception:
+                self.vehicle_name = "Drone1"
+            print(f"Detected vehicle: '{self.vehicle_name}'")
         except Exception as e:
             print(f"[WARN] AirSim not available, using simulation mode: {e}")
             self.bridge = None
             self.use_airsim = False
+            self.vehicle_name = None
             self._init_sim()
 
         self.planner = EGOPlanner(config)
@@ -48,6 +56,7 @@ class UAVRLOEnv:
 
         self.goal = None
         self.prev_pos = None
+        self.prev_vel = None
         self.current_pos = None
         self.current_vel = None
         self.current_yaw = 0.0
@@ -55,6 +64,7 @@ class UAVRLOEnv:
         self.collision_count = 0
         self.trajectory = []
         self.sim_obstacles = []  # Always initialized, used in both modes
+        self.prev_yaw = 0.0  # For computing yaw rate
 
     def _init_sim(self):
         """Initialize simple simulation state for offline testing."""
@@ -110,9 +120,11 @@ class UAVRLOEnv:
             self.goal = np.array(goal)
 
         self.prev_pos = self.current_pos.copy()
+        self.prev_vel = self.current_vel.copy() if self.current_vel is not None else np.zeros(3)
         self.step_count = 0
         self.collision_count = 0
         self.trajectory = [self.current_pos.copy()]
+        self.prev_yaw = self.current_yaw
 
         print(f"[RESET] Goal: {self.goal}, Start: {self.current_pos}")
         return self._get_obs()
@@ -166,6 +178,8 @@ class UAVRLOEnv:
         reward = compute_reward(
             self.current_pos, self.prev_pos, self.goal,
             min_dist_to_obstacle=min_dist,
+            prev_vel=self.prev_vel,
+            curr_vel=self.current_vel,
             sigma=config.REWARD_SIGMA,
             beta=config.REWARD_BETA,
         )
@@ -176,6 +190,7 @@ class UAVRLOEnv:
             reward += 100.0
 
         self.prev_pos = self.current_pos.copy()
+        self.prev_vel = self.current_vel.copy() if self.current_vel is not None else np.zeros(3)
         self.step_count += 1
         self.trajectory.append(self.current_pos.copy())
 
@@ -210,77 +225,66 @@ class UAVRLOEnv:
         )
 
     def _get_rangefinder_airsim(self):
-        """Get rangefinder distances via AirSim depth image + distance sensor fallback."""
+        """Get 25 rangefinder distances using LiDAR + distance sensors from settings.json."""
         import airsim
 
         distances = np.full(len(self.ray_directions), config.RANGE_MAX)
 
-        # Try depth image first — extract distances in ray directions
-        try:
-            responses = self.bridge.client.simGetImages([
-                airsim.ImageRequest("0", airsim.ImageType.DepthVis, True, False),
-                airsim.ImageRequest("0", airsim.ImageType.DepthPerspective, True, True),
-            ])
-            for resp in responses:
-                if resp.height > 0 and resp.width > 0:
-                    # DepthPerspective returns raw float depth in meters
-                    depth_1d = np.frombuffer(resp.image_data_float, dtype=np.float32)
-                    depth_2d = depth_1d.reshape(resp.height, resp.width)
-                    distances = self._extract_ray_distances_from_depth(depth_2d, self.ray_directions)
-                    return distances
-        except Exception as e:
-            print(f"[WARN] Depth image failed: {e}")
+        # === LiDAR: horizontal 360° single-line ===
+        lidar_data = None
+        for name in ["Lidar1", "LLidar1"]:
+            try:
+                lidar_data = self.bridge.client.getLidarData(
+                    lidar_name=name, vehicle_name=self.vehicle_name
+                )
+                if lidar_data and len(lidar_data.point_cloud) >= 3:
+                    break
+                lidar_data = None
+            except Exception:
+                lidar_data = None
 
-        # Fallback: try distance sensor if configured in settings.json
-        try:
-            ds = self.bridge.client.getDistanceSensorData()
-            if ds.distance < 1e5:  # Valid reading
-                distances[:] = ds.distance
-        except Exception:
-            print(f"[WARN] Distance sensor not configured in settings.json")
-            print("[WARN] Using max range for all rays — add a Distance sensor to settings.json")
-
-        return distances
-
-    def _extract_ray_distances_from_depth(self, depth_image, ray_directions):
-        """
-        Extract distance in each ray direction from a depth image.
-        depth_image: (H, W) array in meters
-        ray_directions: (N, 3) array in camera frame
-        """
-        import airsim
-
-        h, w = depth_image.shape
-        distances = np.full(len(ray_directions), config.RANGE_MAX)
-
-        # Get camera info
-        try:
-            camera_info = self.bridge.client.simGetCameraInfo(
-                "0", vehicle_name="", image_type=airsim.ImageType.Scene
+        if lidar_data is not None:
+            # Build 360-bin horizontal distance array (same as Model1)
+            lidar_360 = self._lidar_to_360(lidar_data.point_cloud)
+            # Sample 5 horizontal angles for the center row of our 5x5 grid
+            h_angles = np.linspace(
+                -np.radians(config.RANGE_HFOV / 2),
+                np.radians(config.RANGE_HFOV / 2),
+                config.RANGE_RAYS_H,
             )
-            fx = camera_info.proj_mat[0]
-            fy = camera_info.proj_mat[5]
-            cx = w / 2.0
-            cy = h / 2.0
-        except Exception:
-            # Default FOV ~90 degrees
-            fx = fy = w / 2.0
-            cx = cy = w / 2.0
+            # LiDAR angle 0 = forward, maps to index ~180 (or 0 depending on convention)
+            for i, h_angle in enumerate(h_angles):
+                angle_deg = np.degrees(h_angle)
+                idx = int((angle_deg + 180) % 360) % 360
+                row = 2  # center row
+                for col in range(config.RANGE_RAYS_V):
+                    ray_idx = row * config.RANGE_RAYS_V + col
+                    if lidar_360[idx] < config.RANGE_MAX:
+                        distances[ray_idx] = lidar_360[idx]
 
-        # Sample depth along each ray direction
-        for i, direction in enumerate(ray_directions):
-            # Project ray direction to pixel coordinates
-            # direction is in body frame, assume camera points forward (x-axis)
-            if direction[0] <= 0:
-                continue  # Ray pointing backward, skip
-            pixel_x = int(cx + (direction[1] / direction[0]) * fx)
-            pixel_y = int(cy + (direction[2] / direction[0]) * fy)
-            if 0 <= pixel_x < w and 0 <= pixel_y < h:
-                d = depth_image[pixel_y, pixel_x]
-                if 0 < d < config.RANGE_MAX:
-                    distances[i] = d
+        # === Fill non-center rows with max range (single-line LiDAR can't provide vertical) ===
+        # This is a limitation of the current sensor setup.
+        # For full 5x5 coverage, add a multi-channel LiDAR to settings.json.
 
         return distances
+
+    def _lidar_to_360(self, point_cloud):
+        """Convert LiDAR point cloud to 360-bin horizontal distance array.
+        Same approach as Model1's lidar_points_to_360.
+        """
+        bins = np.ones(360, dtype=np.float32) * config.RANGE_MAX
+        if len(point_cloud) < 3:
+            return bins
+
+        # Point cloud is flat [x1,y1,z1, x2,y2,z2, ...]
+        points = np.array(point_cloud, dtype=np.float32).reshape(-1, 3)
+        for pt in points:
+            angle = np.degrees(np.arctan2(pt[1], pt[0]))
+            idx = int((angle + 180) % 360) % 360
+            dist = np.linalg.norm(pt[:2])
+            if dist < bins[idx]:
+                bins[idx] = dist
+        return bins
 
     def _get_rangefinder_sim(self):
         """Simulate rangefinder distances against known obstacles."""
@@ -341,12 +345,27 @@ class UAVRLOEnv:
             else:
                 vel_cmd = np.zeros(3)
 
-            # Use body-frame velocity control
+            # Compute target yaw from movement direction so sensors face travel direction
+            if np.linalg.norm(vel_cmd[:2]) > 0.1:
+                target_yaw = np.arctan2(vel_cmd[1], vel_cmd[0])
+            else:
+                target_yaw = self.current_yaw
+
+            # Compute yaw rate for smooth rotation
+            yaw_delta = target_yaw - self.current_yaw
+            while yaw_delta > np.pi:
+                yaw_delta -= 2 * np.pi
+            while yaw_delta < -np.pi:
+                yaw_delta += 2 * np.pi
+            yaw_rate = yaw_delta / 0.05
+            yaw_rate = np.clip(yaw_rate, -np.pi, np.pi)
+
+            # Use body-frame velocity control with yaw toward movement direction
             try:
                 self.bridge.client.moveByVelocityBodyFrameAsync(
                     vx=float(vel_cmd[0]), vy=float(vel_cmd[1]),
                     vz=float(vel_cmd[2]), duration=0.05,
-                    yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=0.0),
+                    yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=float(yaw_rate)),
                 )
             except Exception:
                 pass
