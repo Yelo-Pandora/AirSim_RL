@@ -121,6 +121,8 @@ class AirSimUAVEnv(gym.Env):
         self.velocity_norm_max = 10.0
         self.angular_acc_norm_max = 10.0
         self.vertical_distance_norm_max = 40.0
+        # 连续到达计数，用于训练脚本按条件保存模型
+        self.consecutive_arrivals = 0
         #目的地可视化开关
         self.visualize_goal = False
         # 飞行轨迹可视化开关
@@ -146,6 +148,7 @@ class AirSimUAVEnv(gym.Env):
         # 是否显示 16 个航点
         self.visualize_waypoints = False
         self.show_goal_text = False
+        self.total_train_steps = 0
 
     def _normalize_depth_obs(self, depth_tensor):
         return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
@@ -437,11 +440,23 @@ class AirSimUAVEnv(gym.Env):
         reward = self._calculate_reward(info)
         terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
+        if terminated or truncated:
+            if info['arrived']:
+                self.consecutive_arrivals += 1
+            else:
+                self.consecutive_arrivals = 0
+            info['consecutive_arrivals'] = self.consecutive_arrivals
         self._render_dashboard(action, drone_pos, velocity, reward, terminated, truncated, info)
         if self.visualize_goal and self.step_count % self.marker_refresh_interval == 0:
             self._draw_goal_marker()
 
         return obs, reward, terminated, truncated, info
+
+    def set_total_train_steps(self, value):
+        self.total_train_steps = int(value)
+
+    def set_consecutive_arrivals(self, value):
+        self.consecutive_arrivals = int(value)
 
     def _airsim_vec(self, arr, visual_offset=True):
         """
@@ -765,12 +780,13 @@ class AirSimUAVEnv(gym.Env):
         actual_acc = action_to_acceleration(action)
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
-        print(f"\r[Step {self.step_count:4d}] "
+        print(f"\r[Step {self.step_count:4d} | Total {self.total_train_steps:7d}] "
               f"Target: ({self.current_target[0]:5.1f}, {self.current_target[1]:5.1f}, {self.current_target[2]:5.1f}) | "
               f"Pos: ({drone_pos[0]:5.1f}, {drone_pos[1]:5.1f}, {drone_pos[2]:5.1f}) | "
               f"Vel: ({velocity[0]:5.1f}, {velocity[1]:5.1f}, {velocity[2]:5.1f}) | "
               f"Acc: ({actual_acc[0]:5.1f}, {actual_acc[1]:5.1f}, {actual_acc[2]:5.1f}) | "
               f"Rwd: {reward:6.2f} ", end="", flush=True)
+
 
         # 当一个回合结束（撞机、到达终点或超时）时，打印一个换行符，以免下一回合的输出挤在一起
         if terminated or truncated:
