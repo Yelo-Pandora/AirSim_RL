@@ -101,7 +101,7 @@ class AirSimUAVEnv(gym.Env):
 
 
         self.step_count = 0                                                         # 统计当前回合走过的步数
-        self.max_steps = 150                                                        # 允许的最大步数
+        self.max_steps = 200                                                        # 允许的最大步数
         self.current_target = np.array([20.0, 0.0, -2.0], dtype=np.float32)   # 默认目标
         self.current_start_pos = np.array([0.0, 0.0, -2.0], dtype=np.float32) # 默认起点
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
@@ -406,12 +406,14 @@ class AirSimUAVEnv(gym.Env):
         else:
             angle_to_target = 0.0
         # 是否到达终点位置
-        arrived = bool(dis2goal < 1.5)
+        xy_dist = float(np.linalg.norm(rel_pos[:2]))
+        z_dist = abs(float(rel_pos[2]))
+        arrived = bool(xy_dist < 1.5 and z_dist < 2.0)
 
         if self.start_dist > 1e-5:
             cross_product = np.cross(rel_pos, self.start_rel_pos)
             perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
-            crossed_border = bool(perpendicular_dist > 7.0)
+            crossed_border = bool(perpendicular_dist > 20.0)
         else:
             perpendicular_dist = 0.0
             crossed_border = False
