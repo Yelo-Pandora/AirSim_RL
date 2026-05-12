@@ -43,32 +43,50 @@ class AirSimUAVEnv(gym.Env):
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.positions_file = os.path.join(base_dir, "dataset", "relative_coordinates_export.csv")
         self.position_pairs = []
+        self.region_points = {}
+        self.available_regions = []
         if os.path.exists(self.positions_file):
             try:
-                with open(self.positions_file, mode='r', encoding='utf-8') as f:
+                with open(self.positions_file, mode="r", encoding="utf-8") as f:
                     reader = csv.reader(f)
-                    next(reader)  # 跳过第一行表头 (x,y,z)
+                    next(reader, None)
                     for row in reader:
-                        if len(row) >= 3:
-                            # 读取 CSV 中的终点坐标
-                            target_pos = [float(row[0]), float(row[1]), float(row[2])]
-                            # 组装数据字典：起点固定，终点来自 CSV
-                            self.position_pairs.append({
-                                "start": [0.0, 0.0, 0.0],
-                                "target": target_pos
-                            })
-                print(f"成功从 CSV 加载 {len(self.position_pairs)} 组目标坐标数据")
+                        if len(row) < 3:
+                            continue
+                        point = [float(row[0]), float(row[1]), float(row[2])]
+                        region = row[3].strip() if len(row) >= 4 and row[3].strip() != "" else "0"
+                        self.region_points.setdefault(region, []).append(point)
+                        self.position_pairs.append({
+                            "start": point,
+                            "target": point,
+                            "region": region,
+                        })
+                self.available_regions = [
+                    region for region, points in self.region_points.items() if len(points) >= 2
+                ]
+                print(
+                    f"??? CSV ?? {len(self.position_pairs)} ?????"
+                    f"?? {len(self.available_regions)} ???????????"
+                )
             except Exception as e:
-                print(f"读取 CSV 文件时出错: {e}")
-        # 兜底逻辑：如果文件不存在或内容为空，使用默认值
+                print(f"?? CSV ?????: {e}")
+
         if not self.position_pairs:
-            self.position_pairs = [{"start": [0.0, 0.0, 0.0], "target": [20.0, 0.0, -2.0]}]
-            print(f"警告：未找到或未能读取 {self.positions_file}，使用默认测试位置。")
+            self.position_pairs = [{
+                "start": [0.0, 0.0, 0.0],
+                "target": [20.0, 0.0, -2.0],
+                "region": "default",
+            }]
+            self.region_points = {"default": [[0.0, 0.0, 0.0], [20.0, 0.0, -2.0]]}
+            self.available_regions = ["default"]
+            print(f"??: ???????? {self.positions_file}??????????")
+        elif not self.available_regions:
+            all_points = [pair["start"] for pair in self.position_pairs]
+            if len(all_points) >= 2:
+                self.region_points = {"default": all_points}
+                self.available_regions = ["default"]
+                print("??: ?? CSV ????? 2 ????????????????????")
 
-
-
-        # 参数初始化
-        # 动作空间: 3维连续加速度
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         # 状态空间: Dict字典形式，包含下采样后的深度图、精简后的雷达数据、无人机自身的运动参数
         self.observation_space = spaces.Dict({
@@ -104,6 +122,7 @@ class AirSimUAVEnv(gym.Env):
         self.max_steps = 200                                                        # 允许的最大步数
         self.current_target = np.array([20.0, 0.0, -2.0], dtype=np.float32)   # 默认目标
         self.current_start_pos = np.array([0.0, 0.0, -2.0], dtype=np.float32) # 默认起点
+        self.current_region = "default"
         self.start_rel_pos = self.current_target - self.current_start_pos           # 开始的相对位置
         self.start_dist = float(np.linalg.norm(self.start_rel_pos))                 # 起点与终点的距离
         self.dt = 0.5                                                               # 步长时间
@@ -626,18 +645,19 @@ class AirSimUAVEnv(gym.Env):
         super().reset(seed=seed)
         self.step_count = 0
         self.traj_points = []
-        # 如果 options 中没有指定具体的 target，则从数据集中随机选一个
+        # 如果 options 中没有指定具体的 target，则从数据集中随机选一个        options = options or {}
         options = options or {}
         if "start_pos" in options and "target" in options:
             start_pos = options["start_pos"]
             target_pos = options["target"]
+            selected_region = options.get("region", "manual")
         else:
-            selected_pair = random.choice(self.position_pairs)
-            start_pos = selected_pair["start"]
-            target_pos = selected_pair["target"]
+            selected_region = random.choice(self.available_regions)
+            start_pos, target_pos = random.sample(self.region_points[selected_region], 2)
 
         self.current_start_pos = np.array(start_pos, dtype=np.float32)
         self.current_target = np.array(target_pos, dtype=np.float32)
+        self.current_region = selected_region
         # 重置airsim环境
         self._clear_visual_markers()
         self.client.reset()
@@ -693,7 +713,7 @@ class AirSimUAVEnv(gym.Env):
             self.start_dist = 1.0
         self.last_dis2goal = self.start_dist  # 记录初始距离
 
-        return obs, {'start': self.current_start_pos, 'target': self.current_target}
+        return obs, {'start': self.current_start_pos, 'target': self.current_target, 'region': self.current_region}
 
     def _calculate_reward(self, info):
         """按照论文公式 (2)-(14) 实现"""
