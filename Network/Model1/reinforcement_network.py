@@ -432,7 +432,7 @@ class AirSimUAVEnv(gym.Env):
         if self.start_dist > 1e-5:
             cross_product = np.cross(rel_pos, self.start_rel_pos)
             perpendicular_dist = np.linalg.norm(cross_product) / self.start_dist
-            crossed_border = bool(perpendicular_dist > 20.0)
+            crossed_border = bool(perpendicular_dist > 40.0)
         else:
             perpendicular_dist = 0.0
             crossed_border = False
