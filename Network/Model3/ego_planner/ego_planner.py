@@ -66,7 +66,8 @@ class EGOPlanner:
         )
 
         # Use guiding path waypoints as initial control points
-        init_ctrl = np.vstack([current_pos.reshape(1, 3), waypoints, local_target[:3].reshape(1, 3)])
+        # waypoints already have n_ctrl points from GuidingPath
+        init_ctrl = waypoints
 
         # Optimize trajectory
         spline = self.optimizer.optimize(

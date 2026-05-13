@@ -90,8 +90,9 @@ def train(args):
             obs = next_obs
             step += 1
 
-            # Update agent
-            agent.update()
+            # Update agent every 100 time steps per paper Algorithm 1
+            if step % 100 == 0:
+                agent.update()
 
             if done:
                 break

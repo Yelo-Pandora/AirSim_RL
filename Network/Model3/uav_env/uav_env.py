@@ -56,7 +56,6 @@ class UAVRLOEnv:
 
         self.goal = None
         self.prev_pos = None
-        self.prev_vel = None
         self.current_pos = None
         self.current_vel = None
         self.current_yaw = 0.0
@@ -120,7 +119,6 @@ class UAVRLOEnv:
             self.goal = np.array(goal)
 
         self.prev_pos = self.current_pos.copy()
-        self.prev_vel = self.current_vel.copy() if self.current_vel is not None else np.zeros(3)
         self.step_count = 0
         self.collision_count = 0
         self.trajectory = [self.current_pos.copy()]
@@ -178,8 +176,6 @@ class UAVRLOEnv:
         reward = compute_reward(
             self.current_pos, self.prev_pos, self.goal,
             min_dist_to_obstacle=min_dist,
-            prev_vel=self.prev_vel,
-            curr_vel=self.current_vel,
             sigma=config.REWARD_SIGMA,
             beta=config.REWARD_BETA,
         )
@@ -190,7 +186,6 @@ class UAVRLOEnv:
             reward += 100.0
 
         self.prev_pos = self.current_pos.copy()
-        self.prev_vel = self.current_vel.copy() if self.current_vel is not None else np.zeros(3)
         self.step_count += 1
         self.trajectory.append(self.current_pos.copy())
 

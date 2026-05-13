@@ -2,11 +2,12 @@
 """
 test_navigation.py — Evaluation script for trained RLoPlanner model.
 
-Runs evaluation episodes and computes metrics:
+Runs evaluation episodes and computes metrics per paper Section V-B:
+- Average reward
 - Success rate
-- Collision rate
 - Trapped rate
-- Path efficiency
+- Collision rate
+- Path efficiency (straight-line / actual path length)
 - Average acceleration and jerk
 """
 
@@ -36,7 +37,7 @@ def generate_test_obstacles(env, n_obstacles=10, area=30, height_range=(-10, -2)
         env.add_sim_obstacle(pos, radius)
 
 
-def evaluate(model_path, n_episodes=50, verbose=True):
+def evaluate(model_path, n_episodes=250, verbose=True):
     """Evaluate trained model."""
     # Initialize
     agent = RSPGAgent(
@@ -56,6 +57,7 @@ def evaluate(model_path, n_episodes=50, verbose=True):
     total_reward = 0.0
     total_steps = 0
     path_lengths = []
+    straight_dists = []
     accelerations = []
     jerks = []
 
@@ -66,6 +68,7 @@ def evaluate(model_path, n_episodes=50, verbose=True):
         episode_reward = 0.0
         positions = [env.current_pos.copy()]
         velocities = [env.current_vel.copy()]
+        start_pos = env.current_pos.copy()
         done = False
 
         while not done:
@@ -93,27 +96,28 @@ def evaluate(model_path, n_episodes=50, verbose=True):
         )
         path_lengths.append(path_len)
 
-        # Straight-line distance
-        straight_dist = np.linalg.norm(positions[0] - env.goal)
-        if straight_dist > 0:
-            path_lengths[-1] = path_len
+        # Straight-line distance from start to goal
+        straight_dist = np.linalg.norm(start_pos - env.goal)
+        straight_dists.append(straight_dist)
 
         # Acceleration and jerk
         positions_arr = np.array(positions)
         if len(positions_arr) > 2:
-            dt = 0.1
+            dt = config.PLANNER_DT
             velocities_arr = np.diff(positions_arr, axis=0) / dt
             if len(velocities_arr) > 1:
                 acc = np.diff(velocities_arr, axis=0) / dt
-                jerk = np.diff(acc, axis=0) / dt
                 accelerations.append(np.mean(np.linalg.norm(acc, axis=1)))
-                jerks.append(np.mean(np.linalg.norm(jerk, axis=1)))
+                if len(acc) > 1:
+                    jerk = np.diff(acc, axis=0) / dt
+                    jerks.append(np.mean(np.linalg.norm(jerk, axis=1)))
 
         if verbose:
             status = "SUCCESS" if reason == "arrived" else f"FAILED({reason})"
+            pe = straight_dist / path_len if path_len > 0 else 0.0
             print(f"  Episode {ep + 1}/{n_episodes}: {status} | "
                   f"Steps: {env.step_count} | Reward: {episode_reward:.2f} | "
-                  f"Path: {path_lengths[-1]:.2f}m")
+                  f"Path: {path_len:.2f}m | Efficiency: {pe:.3f}")
 
     # Summary
     success_rate = successes / n_episodes * 100
@@ -122,11 +126,12 @@ def evaluate(model_path, n_episodes=50, verbose=True):
     avg_reward = total_reward / n_episodes
     avg_steps = total_steps / n_episodes
 
-    avg_path_efficiency = 0.0
+    # Path efficiency: straight-line / actual path (only for successful episodes)
+    path_efficiencies = []
     for i in range(n_episodes):
-        if path_lengths[i] > 0:
-            # This is an approximation since we don't track straight-line per episode
-            pass
+        if path_lengths[i] > 0 and straight_dists[i] > 0:
+            path_efficiencies.append(straight_dists[i] / path_lengths[i])
+    avg_path_efficiency = np.mean(path_efficiencies) if path_efficiencies else 0.0
 
     avg_acc = np.mean(accelerations) if accelerations else 0.0
     avg_jerk = np.mean(jerks) if jerks else 0.0
@@ -135,12 +140,13 @@ def evaluate(model_path, n_episodes=50, verbose=True):
     print("EVALUATION RESULTS")
     print("=" * 50)
     print(f"Episodes:            {n_episodes}")
+    print(f"Average reward:      {avg_reward:.2f}")
     print(f"Success rate:        {success_rate:.1f}%")
     print(f"Collision rate:      {collision_rate:.1f}%")
     print(f"Trapped rate:        {trapped_rate:.1f}%")
-    print(f"Average reward:      {avg_reward:.2f}")
     print(f"Average steps:       {avg_steps:.1f}")
-    print(f"Average acceleration: {avg_acc:.3f} m/s²")
+    print(f"Path efficiency:     {avg_path_efficiency:.3f}")
+    print(f"Average acceleration:{avg_acc:.3f} m/s²")
     print(f"Average jerk:        {avg_jerk:.3f} m/s³")
     print("=" * 50)
 
@@ -150,6 +156,7 @@ def evaluate(model_path, n_episodes=50, verbose=True):
         "trapped_rate": trapped_rate,
         "avg_reward": avg_reward,
         "avg_steps": avg_steps,
+        "avg_path_efficiency": avg_path_efficiency,
         "avg_acceleration": avg_acc,
         "avg_jerk": avg_jerk,
     }
@@ -158,7 +165,7 @@ def evaluate(model_path, n_episodes=50, verbose=True):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate RLoPlanner model")
     parser.add_argument("model_path", type=str, help="Path to trained model checkpoint")
-    parser.add_argument("--episodes", type=int, default=50, help="Number of evaluation episodes")
+    parser.add_argument("--episodes", type=int, default=250, help="Number of evaluation episodes (default 250 per paper)")
     parser.add_argument("--quiet", action="store_true", help="Only print summary")
     args = parser.parse_args()
 

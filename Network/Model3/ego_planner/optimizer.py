@@ -21,6 +21,7 @@ class TrajectoryOptimizer:
         self.lp_pos_weight = config.LOCAL_TARGET_POS_WEIGHT
         self.lp_vel_weight = config.LOCAL_TARGET_VEL_WEIGHT
         self.v_max = config.UAV_MAX_SPEED
+        self.bspline_dt = config.BSPLINE_DT
 
     def optimize(self, start_pos, start_vel, target_pos, target_vel,
                  voxel_grid, init_ctrl_points=None):
@@ -38,13 +39,13 @@ class TrajectoryOptimizer:
         Returns:
             Optimized BSpline trajectory
         """
-        n_ctrl = 10
         if init_ctrl_points is not None:
             ctrl = np.array(init_ctrl_points, dtype=np.float64)
+            n_ctrl = len(ctrl)
         else:
-            ctrl = self._init_control_points(start_pos, start_vel, target_pos, n_ctrl)
+            ctrl = self._init_control_points(start_pos, start_vel, target_pos, n_ctrl=10)
 
-        spline = BSpline(ctrl, order=4, dt=0.2)
+        spline = BSpline(ctrl, order=4, dt=self.bspline_dt)
 
         for iteration in range(self.opt_iters):
             total_grad = np.zeros_like(ctrl)

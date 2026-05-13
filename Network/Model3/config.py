@@ -67,10 +67,10 @@ REWARD_SIGMA = 2.0           # obstacle penalty decay σ
 REWARD_BETA = 25.0           # distance reward scale β
 
 # ============== Training ==============
-TRAIN_EPISODES = 200         # total training episodes
+TRAIN_EPISODES = 10000       # total training episodes (paper: ~10k timesteps)
 TRAIN_MAX_STEPS = 500        # max steps per episode
-TRAIN_SAVE_INTERVAL = 10     # save model every N episodes
-TRAIN_LOG_INTERVAL = 1       # log metrics every N episodes
+TRAIN_SAVE_INTERVAL = 100    # save model every N episodes
+TRAIN_LOG_INTERVAL = 10      # log metrics every N episodes
 TRAIN_SEED = 42              # random seed
 
 # ============== Paths ==============
