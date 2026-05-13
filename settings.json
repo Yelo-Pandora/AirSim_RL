@@ -1,45 +1,44 @@
 {
   "SettingsVersion": 1.2,
   "SimMode": "Multirotor",
-  "ViewMode": "SpringArmChase",
-  "CameraDefaults": {
-    "CaptureSettings": [
-      {
-        "ImageType": 0,
-        "Width": 320,
-        "Height": 180,
-        "FOV_Degrees": 90
-      },
-      {
-        "ImageType": 2,
-        "Width": 320,
-        "Height": 180,
-        "FOV_Degrees": 90
-      }
-    ]
+  "ViewMode": "Manual",
+  "PawnPaths": {
+    "MyDronePawn": {
+      "PawnBP": "Class'/Game/BP/BP_MyFlyingPawn.BP_MyFlyingPawn_C'"
+    }
   },
+  
   "Vehicles": {
     "Drone1": {
       "VehicleType": "SimpleFlight",
       "AutoCreate": true,
+      "PawnPath": "MyDronePawn",
       "Sensors": {
         "DistanceBottom": {
           "SensorType": 5,
           "Enabled": true,
           "MinDistance": 0.2,
           "MaxDistance": 40,
-          "X": 0, "Y": 0, "Z": 0,
-          "Yaw": 0, "Pitch": -90, "Roll": 0,
-          "DrawDebugPoints": true
+          "X": 0,
+          "Y": 0,
+          "Z": 0,
+          "Yaw": 0,
+          "Pitch": -90,
+          "Roll": 0,
+          "DrawDebugPoints": false
         },
         "DistanceTop": {
           "SensorType": 5,
           "Enabled": true,
           "MinDistance": 0.2,
           "MaxDistance": 40,
-          "X": 0, "Y": 0, "Z": -0.5,
-          "Yaw": 0, "Pitch": 90, "Roll": 0,
-          "DrawDebugPoints": true
+          "X": 0,
+          "Y": 0,
+          "Z": -0.5,
+          "Yaw": 0,
+          "Pitch": 90,
+          "Roll": 0,
+          "DrawDebugPoints": false
         },
         "Lidar1": {
           "SensorType": 6,
@@ -57,7 +56,7 @@
           "VerticalFOVLower": 0,
           "HorizontalFOVStart": -180,
           "HorizontalFOVEnd": 180,
-          "DrawDebugPoints": true,
+          "DrawDebugPoints": false,
           "DataFrame": "SensorLocalFrame"
         }
       }
