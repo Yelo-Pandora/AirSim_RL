@@ -145,7 +145,7 @@ class AirSimUAVEnv(gym.Env):
         #目的地可视化开关
         self.visualize_goal = False
         # 飞行轨迹可视化开关
-        self.visualize_traj = False
+        self.visualize_traj = True
 
         # 显示用整体上移高度，单位：米
         # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高

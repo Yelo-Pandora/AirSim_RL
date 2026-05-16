@@ -21,6 +21,7 @@ class TrajectoryOptimizer:
         self.lp_pos_weight = config.LOCAL_TARGET_POS_WEIGHT
         self.lp_vel_weight = config.LOCAL_TARGET_VEL_WEIGHT
         self.v_max = config.UAV_MAX_SPEED
+        self.a_max = 3.0
         self.bspline_dt = config.BSPLINE_DT
 
     def optimize(self, start_pos, start_vel, target_pos, target_vel,
@@ -59,7 +60,12 @@ class TrajectoryOptimizer:
             total_grad += self.w_collision * g_c
 
             # Dynamic feasibility cost
-            c_d, g_d = cost_dynamic_feasibility(spline, v_max=self.v_max, n_samples=20)
+            c_d, g_d = cost_dynamic_feasibility(
+                spline,
+                v_max=self.v_max,
+                a_max=self.a_max,
+                n_samples=20,
+            )
             total_grad += self.w_dynamic * g_d
 
             # Local target cost
@@ -88,6 +94,13 @@ class TrajectoryOptimizer:
             # Update spline
             spline.set_control_points(ctrl)
 
+            # EGO-Planner style time reallocation: relax timing when dynamics are violated.
+            if (iteration + 1) % 5 == 0:
+                max_vel, max_acc = self._estimate_dynamic_extrema(spline)
+                if max_vel > self.v_max * 1.05 or max_acc > self.a_max * 1.05:
+                    scale = max(max_vel / max(self.v_max, 1e-6), np.sqrt(max_acc / max(self.a_max, 1e-6)))
+                    spline.set_dt(spline.dt * min(max(scale, 1.05), 1.5))
+
         return spline
 
     def _init_control_points(self, start, start_vel, target, n_ctrl):
@@ -104,3 +117,14 @@ class TrajectoryOptimizer:
                 frac = i / (n_ctrl - 1)
                 ctrl[i] = start + frac * direction
         return ctrl
+
+    def _estimate_dynamic_extrema(self, spline, n_samples=30):
+        max_vel = 0.0
+        max_acc = 0.0
+        for k in range(n_samples + 1):
+            t = k / max(n_samples, 1) * spline.duration
+            vel = spline.eval_derivative(t, order=1)
+            acc = spline.eval_derivative(t, order=2)
+            max_vel = max(max_vel, float(np.linalg.norm(vel)))
+            max_acc = max(max_acc, float(np.linalg.norm(acc)))
+        return max_vel, max_acc

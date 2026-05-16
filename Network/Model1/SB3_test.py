@@ -76,12 +76,12 @@ def evaluate_model(model_path, num_episodes=5, custom_start=None, custom_target=
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "td3_airsim_uav_model"
+    MODEL_PATH = "checkpoints/td3_resume_latest"
 
     # 🌟 在这里自定义你的测试起点和终点
     # 注意：高度(Z轴)在 AirSim 中，负值表示在空中 (例如 -2.0 表示高出地面 2 米)
-    TEST_START = [0.0, 0.0, -2.0]
-    TEST_TARGET = [30.0, 15.0, -5.0]
+    TEST_START = [-5.8984118,  5.352577,  -3.3930888]
+    TEST_TARGET = [25.462654,  21.757244,  -2.7176943]
 
     # 如果你想随机测试 CSV 里的数据，只需把 custom_start 和 custom_target 设为 None
     # evaluate_model(MODEL_PATH, num_episodes=5, custom_start=None, custom_target=None)

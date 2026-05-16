@@ -58,7 +58,7 @@ class EGOPlanner:
             BSpline trajectory
         """
         if target_vel is None:
-            target_vel = np.zeros(3)
+            target_vel = self._target_velocity_from_local_target(local_target)
 
         # Generate guiding path for initialization
         waypoints = self.guiding_path.generate(
@@ -81,6 +81,30 @@ class EGOPlanner:
 
         self.current_spline = spline
         return spline
+
+    def _target_velocity_from_local_target(self, local_target):
+        """
+        Convert the action's orientation component [phi, theta, psi] into a desired
+        terminal velocity direction so the low-level planner actually uses all 6 action dims.
+        """
+        phi, theta, psi = local_target[3:6]
+        speed = self.config.UAV_MAX_SPEED * 0.5
+
+        direction = np.array(
+            [
+                np.cos(theta) * np.cos(psi),
+                np.cos(theta) * np.sin(psi),
+                np.sin(theta),
+            ],
+            dtype=np.float64,
+        )
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            return np.zeros(3, dtype=np.float64)
+
+        # Roll does not directly set translation direction here; use it as a mild speed modulator.
+        speed_scale = 1.0 - min(abs(phi) / np.pi, 1.0) * 0.25
+        return direction / norm * speed * speed_scale
 
     def get_control_command(self, t):
         """

@@ -35,6 +35,17 @@ def _basis_second_derivative(i, k, u, knots):
     return term1 - term2
 
 
+def _basis_third_derivative(i, k, u, knots):
+    """Third derivative of the i-th B-spline basis function of order k at u."""
+    if k <= 3:
+        return 0.0
+    denom1 = knots[i + k - 1] - knots[i]
+    denom2 = knots[i + k] - knots[i + 1]
+    term1 = (k - 1) / denom1 * _basis_second_derivative(i, k - 1, u, knots) if denom1 > 1e-10 else 0.0
+    term2 = (k - 1) / denom2 * _basis_second_derivative(i + 1, k - 1, u, knots) if denom2 > 1e-10 else 0.0
+    return term1 - term2
+
+
 class BSpline:
     def __init__(self, control_points, order=4, dt=0.2):
         """
@@ -79,8 +90,7 @@ class BSpline:
             elif order == 2:
                 b = _basis_second_derivative(i, self.order, t, self.knots)
             elif order == 3:
-                b = (_basis_second_derivative(i, self.order, t, self.knots)
-                     if self.order > 3 else 0.0)
+                b = _basis_third_derivative(i, self.order, t, self.knots)
             else:
                 b = 0.0
             pt += b * self.control_points[i]
@@ -96,3 +106,8 @@ class BSpline:
 
     def set_control_points(self, new_ctrl):
         self.control_points = np.array(new_ctrl, dtype=np.float64)
+
+    def set_dt(self, new_dt):
+        self.dt = float(new_dt)
+        self.knots = self._uniform_knots()
+        self.duration = self.knots[-1] - self.knots[0]
