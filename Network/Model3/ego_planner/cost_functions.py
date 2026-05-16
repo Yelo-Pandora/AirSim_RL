@@ -37,21 +37,14 @@ def cost_collision(spline, voxel_grid, radius=0.5, n_samples=30):
     for k in range(n_samples):
         t = k / n_samples * duration
         pt = spline.eval(t)
-        vel = spline.eval_derivative(t, order=1)
-        speed = np.linalg.norm(vel)
-        if speed < 1e-6:
-            continue
-        vel_norm = vel / speed
-
         dist, obstacle_pt = voxel_grid.get_distance_with_obstacle(pt)
 
-        if dist < radius:
+        if dist < radius and obstacle_pt is not None:
             penalty = (radius - dist) ** 2
             cost += penalty
             dir_grad = 2 * (radius - dist) * (pt - obstacle_pt) / (np.linalg.norm(pt - obstacle_pt) + 1e-8)
-            db = spline_basis_grad_at_ctrl(t, spline, k_index=None)
             for i in range(len(spline.control_points)):
-                bi = _basis_derivative(i, spline.order, t + spline.knots[0], spline.knots)
+                bi = _basis_function(i, spline.order, t + spline.knots[0], spline.knots)
                 ctrl_grad[i] += dir_grad * bi
 
     return cost, ctrl_grad

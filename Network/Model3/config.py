@@ -1,4 +1,9 @@
-# config.py — RLoPlanner hyperparameters from the paper
+import os
+
+# config.py - RLoPlanner hyperparameters from the paper
+
+MODEL3_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(MODEL3_DIR))
 
 # ============== UAV Model ==============
 UAV_MAX_SPEED = 2.1          # m/s
@@ -8,6 +13,7 @@ UAV_RADIUS = 0.5             # m, collision radius
 UAV_ARRIVE_DIST = 0.5        # m, goal arrival threshold
 
 # ============== EGO-Planner ==============
+PLANNER_MODE = "ego"        # one of: "ego", "straight"
 PLANNER_HORIZON = 5.0        # m, trajectory planning horizon
 PLANNER_DT = 0.1             # s, control loop period
 PLANNER_OPTIM_ITERS = 15     # gradient descent iterations per planning step
@@ -19,9 +25,9 @@ BSPLINE_CTRL_POINTS = 10     # number of control points
 BSPLINE_DT = 0.2             # time interval between control points
 
 # Cost function weights (Eq. 17: J = λ1*Js + λ2*Jc + λ3*Jd + λ4*Jlp)
-COST_SMOOTH_WEIGHT = 1.0     # λ1, trajectory smoothness
+COST_SMOOTH_WEIGHT = 1.0      # λ1, trajectory smoothness
 COST_COLLISION_WEIGHT = 10.0  # λ2, obstacle avoidance
-COST_DYNAMIC_WEIGHT = 1.0    # λ3, dynamic feasibility
+COST_DYNAMIC_WEIGHT = 1.0     # λ3, dynamic feasibility
 COST_LOCAL_TARGET_WEIGHT = 5.0  # λ4, local target tracking
 
 # Local target cost params (Eq. 18)
@@ -39,6 +45,7 @@ RSPG_TAU = 0.01              # target network soft update rate
 RSPG_REPLAY_BUFFER = 100000  # replay buffer capacity
 RSPG_BATCH_SIZE = 256        # batch size for sampling
 RSPG_MAX_HISTORY = 100       # max LSTM unroll length
+RSPG_BURN_IN = 20            # recurrent burn-in length before each training segment
 RSPG_GRAD_CLIP = 1.0         # gradient clipping norm
 RSPG_ENTROPY_ALPHA_INIT = 8.0  # initial entropy coefficient α
 RSPG_ALPHA_LR = 0.0003       # learning rate for entropy coefficient
@@ -56,6 +63,7 @@ RANGE_HFOV = 90.0            # degrees, horizontal FOV
 RANGE_VFOV = 60.0            # degrees, vertical FOV
 RANGE_RAYS_H = 5             # horizontal rays
 RANGE_RAYS_V = 5             # vertical rays
+RANGE_MATCH_MARGIN = 1.2     # angular matching tolerance multiplier for LiDAR-to-ray projection
 
 # ============== Action Space ==============
 ACTION_DIM = 6               # [x, y, z, φ, θ, ψ] local target
@@ -78,12 +86,28 @@ REWARD_OUT_OF_BOUNDS_PENALTY = 50.0
 REWARD_GOAL_BONUS = 100.0
 
 # ============== Training ==============
-TRAIN_EPISODES = 10000       # total training episodes (paper: ~10k timesteps)
+TRAIN_TOTAL_TIMESTEPS = 10000  # paper setting
+TRAIN_EPISODES = 10000       # total training episodes
 TRAIN_MAX_STEPS = 500        # max steps per episode
 TRAIN_SAVE_INTERVAL = 100    # save model every N episodes
 TRAIN_LOG_INTERVAL = 1       # log metrics every N episodes
 TRAIN_SEED = 42              # random seed
+TRAIN_UPDATE_INTERVAL = 100  # replay/update cadence from the paper
 
 # ============== Paths ==============
 MODEL_SAVE_DIR = "models/saved_models"
 LOG_DIR = "logs"
+DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export.csv")
+TRAIN_METRICS_CSV = os.path.join(LOG_DIR, "rspg_train_metrics.csv")
+EVAL_RESULTS_JSON = os.path.join(LOG_DIR, "rspg_eval_results.json")
+
+# ============== AirSim Sensors ==============
+PRIMARY_LIDAR_NAME = "RLoPlannerLidar"
+FALLBACK_LIDAR_NAMES = ("Lidar1", "LLidar1")
+TOPDOWN_CAMERA_NAME = "TopDown"
+TOPDOWN_EXTERNAL_CAMERA_NAME = "TopDownExternal"
+TOPDOWN_CAMERA_HEIGHT = 8.0
+TOPDOWN_CAMERA_PITCH_DEG = -90.0
+
+# ============== Evaluation ==============
+EVAL_EPISODES = 200          # paper metrics use 200 navigation tasks

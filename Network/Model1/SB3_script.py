@@ -16,6 +16,14 @@ from reinforcement_network import CustomCombinedExtractor
 from stable_baselines3.common.noise import NormalActionNoise
 
 
+def has_tensorboard():
+    try:
+        import tensorboard  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class ConsecutiveArrivalSaveCallback(BaseCallback):
     def __init__(self, save_dir, formal_prefix="td3_arrived10", resume_name="td3_resume_latest", verbose=1):
         super().__init__(verbose)
@@ -39,6 +47,7 @@ class ConsecutiveArrivalSaveCallback(BaseCallback):
         streak = int(info.get("consecutive_arrivals", 0))
 
         if done:
+            os.makedirs(self.save_dir, exist_ok=True)
             resume_path = os.path.join(self.save_dir, self.resume_name)
             self.model.save(resume_path)
             if self.verbose > 0:
@@ -55,6 +64,7 @@ class ConsecutiveArrivalSaveCallback(BaseCallback):
         return True
 
     def _on_training_end(self):
+        os.makedirs(self.save_dir, exist_ok=True)
         resume_path = os.path.join(self.save_dir, self.resume_name)
         self.model.save(resume_path)
         if self.verbose > 0:
@@ -65,10 +75,12 @@ class ConsecutiveArrivalSaveCallback(BaseCallback):
 # 训练主程序
 # ==========================================
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tensorboard_enabled = has_tensorboard()
     # 创建环境并包裹 Monitor (用于记录训练日志，如 episode reward)
     env = AirSimUAVEnv()
-    log_dir = "./tb_logs/"
+    log_dir = os.path.join(script_dir, "tb_logs")
     os.makedirs(log_dir, exist_ok=True)
     env = Monitor(env, log_dir)  # Monitor 可以记录每个回合的奖励和长度
 
@@ -89,12 +101,18 @@ def main():
         activation_fn=torch.nn.ReLU
     )
 
-    save_dir = "./checkpoints"
+    save_dir = os.path.join(script_dir, "checkpoints")
+    os.makedirs(save_dir, exist_ok=True)
     resume_path = os.path.join(save_dir, "td3_resume_latest.zip")
     callback = ConsecutiveArrivalSaveCallback(save_dir=save_dir)
 
     # 4. 实例化或恢复 TD3 模型
     print(f"Using device: {device}")
+    print(f"Checkpoint directory: {save_dir}")
+    if tensorboard_enabled:
+        print(f"TensorBoard logging enabled: {log_dir}")
+    else:
+        print("TensorBoard not installed, disabling TensorBoard logging.")
     if os.path.exists(resume_path):
         print(f"Loading existing checkpoint: {resume_path}")
         model = TD3.load(
@@ -118,7 +136,7 @@ def main():
             target_policy_noise=0.2,            # 策略噪声
             target_noise_clip=0.5,              # 策略噪声裁剪范围
             policy_kwargs=policy_kwargs,        # 注入自定义的网络特征提取器
-            tensorboard_log="./tb_logs/",      # TensorBoard 日志保存路径
+            tensorboard_log=log_dir if tensorboard_enabled else None,  # TensorBoard ??????
             device=device,                      # 使用 cuda
             verbose=0                           # 打印详细输出
         )
@@ -128,7 +146,7 @@ def main():
     total_timesteps = 300000  # 设置训练的总步数
     model.learn(
         total_timesteps=total_timesteps,
-        tb_log_name="TD3_AirSim_Run1",  # TensorBoard 中显示的实验名称
+        tb_log_name="TD3_AirSim_Run1" if tensorboard_enabled else None,  # TensorBoard ????????
         callback=callback,
         reset_num_timesteps=not os.path.exists(resume_path),
         # progress_bar=True  # 显示进度条 (需安装 tqdm)

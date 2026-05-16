@@ -1,19 +1,22 @@
 #!/usr/bin/env python
 """
-train_rspg.py — Training script for RLoPlanner (RSPG + EGO-Planner)
+Training script for RLoPlanner (RSPG + EGO-Planner).
 
-Trains the Recurrent Soft Policy Gradient agent to generate local targets,
-which are then tracked by the EGO-Planner for smooth, collision-free navigation.
+Tightened to match the paper's protocol more closely:
+- global training budget driven by timesteps
+- replay updates every 100 global timesteps
+- rolling reward statistics over 250 episodes
 """
 
+import argparse
+import csv
 import os
 import sys
 import time
-import argparse
+
 import numpy as np
 import torch
 
-# Ensure Model3 is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
@@ -22,7 +25,7 @@ from uav_env.uav_env import UAVRLOEnv
 
 
 def generate_random_obstacles(env, n_obstacles=10, area=30, height_range=(-10, -2)):
-    """Generate random cylindrical obstacles for training."""
+    """Generate random cylindrical obstacles for offline simulation training."""
     env.clear_sim_obstacles()
     for _ in range(n_obstacles):
         pos = [
@@ -34,44 +37,62 @@ def generate_random_obstacles(env, n_obstacles=10, area=30, height_range=(-10, -
         env.add_sim_obstacle(pos, radius)
 
 
+def append_metrics_row(path, row, write_header=False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def train(args):
-    # Set random seed
     np.random.seed(config.TRAIN_SEED)
     torch.manual_seed(config.TRAIN_SEED)
 
-    # Create save directory
     os.makedirs(config.MODEL_SAVE_DIR, exist_ok=True)
+    os.makedirs(config.LOG_DIR, exist_ok=True)
 
-    # Initialize environment
-    env = UAVRLOEnv()
-
-    # Initialize agent
+    env = UAVRLOEnv(planner_mode=args.planner_mode)
     agent = RSPGAgent(
         obs_dim=config.OBS_DIM,
         action_dim=config.ACTION_DIM,
         config=config,
     )
 
-    # Resume from checkpoint if specified
     start_episode = 0
+    global_steps = 0
     if args.resume:
         print(f"Loading checkpoint from {args.resume}")
         agent.load(args.resume)
-        start_episode = int(args.resume.split("_ep")[-1].split(".")[0]) + 1
+        base = os.path.basename(args.resume)
+        if "_ep" in base:
+            start_episode = int(base.split("_ep")[-1].split(".")[0]) + 1
 
-    print(f"Starting training: {config.TRAIN_EPISODES} episodes, "
-          f"obs_dim={config.OBS_DIM}, action_dim={config.ACTION_DIM}")
+    total_timestep_budget = args.timesteps if args.timesteps is not None else config.TRAIN_TOTAL_TIMESTEPS
+    max_episodes = args.episodes if args.episodes is not None else config.TRAIN_EPISODES
+
+    print(
+        f"Starting training: timestep_budget={total_timestep_budget}, "
+        f"max_episodes={max_episodes}, obs_dim={config.OBS_DIM}, action_dim={config.ACTION_DIM}"
+    )
     print(f"Device: {agent.device}")
+    print(f"AirSim mode: {env.use_airsim}")
+    print(f"Planner mode: {env.planner_mode}")
 
     episode_rewards = []
     success_count = 0
     reason_counts = {}
 
-    for episode in range(start_episode, config.TRAIN_EPISODES):
-        # Generate random obstacles for this episode
-        generate_random_obstacles(env, n_obstacles=np.random.randint(5, 15))
+    for episode in range(start_episode, max_episodes):
+        if global_steps >= total_timestep_budget:
+            break
 
-        # Reset environment
+        if not env.use_airsim:
+            generate_random_obstacles(env, n_obstacles=np.random.randint(5, 15))
+
+        env.set_current_episode(episode + 1)
+        env.set_total_train_steps(global_steps)
         obs = env.reset()
         episode_reward = 0.0
         reward_component_sums = {}
@@ -79,11 +100,8 @@ def train(args):
         step = 0
         info = {"reason": "not_started"}
 
-        while step < config.TRAIN_MAX_STEPS:
-            # Select action
+        while step < config.TRAIN_MAX_STEPS and global_steps < total_timestep_budget:
             action, hx = agent.select_action(obs, hx=hx)
-
-            # Execute step
             next_obs, reward, done, info = env.step(action)
             executed_action = info.get("executed_action", action)
 
@@ -95,20 +113,24 @@ def train(args):
                 reward_component_sums[name] = reward_component_sums.get(name, 0.0) + float(value)
             obs = next_obs
             step += 1
+            global_steps += 1
+            env.set_total_train_steps(global_steps)
 
-            # Update agent every 100 time steps per paper Algorithm 1
-            if step % 100 == 0:
+            if global_steps % config.TRAIN_UPDATE_INTERVAL == 0:
                 agent.update()
 
             if done:
                 break
 
-        # Episode summary
         episode_rewards.append(episode_reward)
         reason = info.get("reason", "unknown") or "running"
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         if reason == "arrived":
             success_count += 1
+        elif reason == "collision":
+            collision_count += 1
+        elif reason == "timeout":
+            trapped_count += 1
 
         # Logging
         if (episode + 1) % config.TRAIN_LOG_INTERVAL == 0:
@@ -128,15 +150,46 @@ def train(args):
                   f"Alpha: {agent.alpha.item():.4f} | "
                   f"R[{component_log}]")
 
-        # Save checkpoint
-        if (episode + 1) % config.TRAIN_SAVE_INTERVAL == 0:
+            print(
+                f"Episode {episode + 1}/{max_episodes} | "
+                f"GlobalSteps: {global_steps}/{total_timestep_budget} | "
+                f"Reward: {episode_reward:.2f} | Avg({config.TRAIN_REWARD_WINDOW}): {avg_reward:.2f} | "
+                f"Success: {success_rate:.1f}% | Collision: {collision_rate:.1f}% | Trapped: {trapped_rate:.1f}% | "
+                f"Steps: {step} | Reason: {reason} | "
+                f"StartRegion: {info.get('start_region')} -> GoalRegion: {info.get('goal_region')} | "
+                f"Alpha: {agent.alpha.item():.4f} | SPS: {steps_per_sec:.2f}"
+            )
+
+            metrics_row = {
+                "episode": episode + 1,
+                "global_steps": global_steps,
+                "episode_reward": round(float(episode_reward), 6),
+                f"avg_reward_{config.TRAIN_REWARD_WINDOW}": round(avg_reward, 6),
+                "success_rate": round(success_rate, 4),
+                "collision_rate": round(collision_rate, 4),
+                "trapped_rate": round(trapped_rate, 4),
+                "episode_steps": step,
+                "reason": reason,
+                "start_region": info.get("start_region"),
+                "goal_region": info.get("goal_region"),
+                "alpha": round(float(agent.alpha.item()), 6),
+                "steps_per_sec": round(float(steps_per_sec), 6),
+            }
+            append_metrics_row(
+                config.TRAIN_METRICS_CSV,
+                metrics_row,
+                write_header=not metrics_header_written,
+            )
+            metrics_header_written = True
+
+        if (episode + 1) % config.TRAIN_SAVE_INTERVAL == 0 or global_steps >= total_timestep_budget:
             save_path = os.path.join(config.MODEL_SAVE_DIR, f"rspg_ep{episode + 1}.pth")
             agent.save(save_path)
-            print(f"  Saved model to {save_path}")
+            print(f"Saved model to {save_path}")
 
-    # Final save
     final_path = os.path.join(config.MODEL_SAVE_DIR, "rspg_final.pth")
     agent.save(final_path)
+    total_episodes_run = max(len(episode_rewards), 1)
     print(f"\nTraining complete. Final model saved to {final_path}")
     print(f"Overall success rate: {success_count / config.TRAIN_EPISODES * 100:.1f}%")
     print(f"Termination reasons: {reason_counts}")
@@ -145,12 +198,16 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser(description="Train RLoPlanner RSPG agent")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--episodes", type=int, default=None, help="Override number of training episodes")
+    parser.add_argument("--episodes", type=int, default=None, help="Override max number of episodes")
+    parser.add_argument("--timesteps", type=int, default=None, help="Override total timestep budget")
+    parser.add_argument(
+        "--planner-mode",
+        type=str,
+        default=config.PLANNER_MODE,
+        choices=["ego", "straight"],
+        help="Low-level execution mode",
+    )
     args = parser.parse_args()
-
-    if args.episodes:
-        config.TRAIN_EPISODES = args.episodes
-
     train(args)
 
 
