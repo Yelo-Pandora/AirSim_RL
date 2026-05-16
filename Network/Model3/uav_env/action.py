@@ -15,7 +15,11 @@ def local_target_to_world(current_pos, current_yaw, action):
         target_angles: (3,) target orientation [φ, θ, ψ]
     """
     body_pos = action[:3]
-    target_angles = action[3:6]
+    target_angles = action[3:6].copy()
+    # The local target pose is predicted in the UAV/body frame.  Position is
+    # rotated into the world frame below; yaw needs the same frame conversion.
+    target_angles[2] += current_yaw
+    target_angles[2] = (target_angles[2] + np.pi) % (2 * np.pi) - np.pi
 
     # Rotation matrix for yaw (around z-axis)
     cos_yaw = np.cos(current_yaw)
@@ -30,7 +34,7 @@ def local_target_to_world(current_pos, current_yaw, action):
     return world_pos, target_angles
 
 
-def clip_action(action, pos_min=1.0, pos_max=5.0):
+def clip_action(action, pos_min=0.0, pos_max=5.0):
     """
     Clip action to valid range.
     Position part: scaled to [pos_min, pos_max]
@@ -39,11 +43,13 @@ def clip_action(action, pos_min=1.0, pos_max=5.0):
     pos = action[:3].copy()
     angles = action[3:6].copy()
 
-    # Normalize position to desired range
+    # Keep the policy's predicted local target direction.  The paper defines the
+    # action as a local target pose, so a near-zero vector must not be rewritten
+    # into a fixed "go forward" command.
     pos_norm = np.linalg.norm(pos)
     if pos_norm > 1e-6:
         pos = pos / pos_norm * np.clip(pos_norm, pos_min, pos_max)
-    else:
+    elif pos_min > 0.0:
         pos = np.array([pos_min, 0.0, 0.0])
 
     # Clip angles

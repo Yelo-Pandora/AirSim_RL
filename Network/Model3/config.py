@@ -59,18 +59,29 @@ RANGE_RAYS_V = 5             # vertical rays
 
 # ============== Action Space ==============
 ACTION_DIM = 6               # [x, y, z, φ, θ, ψ] local target
-ACTION_POS_MIN = 1.0         # m, min local target distance
+ACTION_POS_MIN = 0.0         # m, paper predicts a local target pose directly
 ACTION_POS_MAX = 5.0         # m, max local target distance
 
 # ============== Reward ==============
 REWARD_SIGMA = 2.0           # obstacle penalty decay σ
 REWARD_BETA = 25.0           # distance reward scale β
 
+# Low-altitude and safety shaping. AirSim uses NED z, so altitude = -z.
+REWARD_SAFE_ALTITUDE = 2.0   # m, discourage policies that skim/fall to ground
+REWARD_ALTITUDE_WEIGHT = 4.0
+REWARD_DESCENT_WEIGHT = 1.0
+REWARD_SMOOTH_ACTION_WEIGHT = 0.05
+REWARD_SPEED_SMOOTH_WEIGHT = 0.02
+REWARD_COLLISION_PENALTY = 25.0
+REWARD_GROUND_PENALTY = 100.0
+REWARD_OUT_OF_BOUNDS_PENALTY = 50.0
+REWARD_GOAL_BONUS = 100.0
+
 # ============== Training ==============
 TRAIN_EPISODES = 10000       # total training episodes (paper: ~10k timesteps)
 TRAIN_MAX_STEPS = 500        # max steps per episode
 TRAIN_SAVE_INTERVAL = 100    # save model every N episodes
-TRAIN_LOG_INTERVAL = 10      # log metrics every N episodes
+TRAIN_LOG_INTERVAL = 1       # log metrics every N episodes
 TRAIN_SEED = 42              # random seed
 
 # ============== Paths ==============

@@ -58,7 +58,7 @@ class EGOPlanner:
             BSpline trajectory
         """
         if target_vel is None:
-            target_vel = np.zeros(3)
+            target_vel = self._target_velocity_from_pose(local_target)
 
         # Generate guiding path for initialization
         waypoints = self.guiding_path.generate(
@@ -81,6 +81,27 @@ class EGOPlanner:
 
         self.current_spline = spline
         return spline
+
+    def _target_velocity_from_pose(self, local_target):
+        """
+        Convert the local target orientation into the desired terminal velocity
+        used by J_lp.  The action pose is [x, y, z, roll, pitch, yaw]; roll is
+        not a translational heading, while pitch/yaw define the flight direction.
+        """
+        if len(local_target) < 6:
+            return np.zeros(3)
+
+        pitch = local_target[4]
+        yaw = local_target[5]
+        direction = np.array([
+            np.cos(yaw) * np.cos(pitch),
+            np.sin(yaw) * np.cos(pitch),
+            np.sin(pitch),
+        ])
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            return np.zeros(3)
+        return direction / norm * self.config.UAV_MAX_SPEED
 
     def get_control_command(self, t):
         """

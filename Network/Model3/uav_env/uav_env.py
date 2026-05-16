@@ -64,6 +64,18 @@ class UAVRLOEnv:
         self.trajectory = []
         self.sim_obstacles = []  # Always initialized, used in both modes
         self.prev_yaw = 0.0  # For computing yaw rate
+        self.prev_action = None
+
+    def _rotate_body_rays_to_world(self, ray_directions, yaw):
+        """Rotate body-frame sensor rays into the world frame around z."""
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+        r_z = np.array([
+            [cos_yaw, -sin_yaw, 0.0],
+            [sin_yaw,  cos_yaw, 0.0],
+            [0.0,      0.0,     1.0],
+        ])
+        return np.array([r_z @ d for d in ray_directions])
 
     def _init_sim(self):
         """Initialize simple simulation state for offline testing."""
@@ -119,6 +131,7 @@ class UAVRLOEnv:
             self.goal = np.array(goal)
 
         self.prev_pos = self.current_pos.copy()
+        self.prev_action = None
         self.step_count = 0
         self.collision_count = 0
         self.trajectory = [self.current_pos.copy()]
@@ -137,7 +150,14 @@ class UAVRLOEnv:
         Returns:
             obs, reward, done, info
         """
-        action = clip_action(action)
+        action = clip_action(
+            action,
+            pos_min=config.ACTION_POS_MIN,
+            pos_max=config.ACTION_POS_MAX,
+        )
+        prev_pos_for_reward = self.prev_pos.copy()
+        prev_vel_for_reward = self.current_vel.copy()
+        prev_action_for_reward = None if self.prev_action is None else self.prev_action.copy()
 
         # Convert body-frame action to world-frame local target
         world_target, target_angles = local_target_to_world(
@@ -149,6 +169,12 @@ class UAVRLOEnv:
             self._update_planner_from_airsim()
         else:
             self._update_planner_from_sim()
+
+        # Paper Eq. 7 uses d_min from the decision-making local target to the
+        # nearest obstacle, not from the UAV position after executing the plan.
+        min_dist, _ = self.planner.voxel_grid.get_distance_with_obstacle(world_target)
+        if min_dist is None:
+            min_dist = config.RANGE_MAX
 
         # Plan trajectory with EGO-Planner
         spline = self.planner.plan(
@@ -168,36 +194,48 @@ class UAVRLOEnv:
         else:
             self._execute_trajectory_sim(spline)
 
-        # Compute reward
-        min_dist, _ = self.planner.voxel_grid.get_distance_with_obstacle(self.current_pos)
-        if min_dist is None:
-            min_dist = config.RANGE_MAX
+        dist_to_goal = np.linalg.norm(self.current_pos - self.goal)
+        self.step_count += 1
+        done, reason = self._check_done(dist_to_goal)
 
-        reward = compute_reward(
-            self.current_pos, self.prev_pos, self.goal,
+        reward, reward_components = compute_reward(
+            self.current_pos, prev_pos_for_reward, self.goal,
             min_dist_to_obstacle=min_dist,
             sigma=config.REWARD_SIGMA,
             beta=config.REWARD_BETA,
+            current_vel=self.current_vel,
+            prev_vel=prev_vel_for_reward,
+            action=action,
+            prev_action=prev_action_for_reward,
+            collided=has_collision,
+            terminal_reason=reason,
+            safe_altitude=config.REWARD_SAFE_ALTITUDE,
+            altitude_weight=config.REWARD_ALTITUDE_WEIGHT,
+            descent_weight=config.REWARD_DESCENT_WEIGHT,
+            smooth_action_weight=config.REWARD_SMOOTH_ACTION_WEIGHT,
+            speed_smooth_weight=config.REWARD_SPEED_SMOOTH_WEIGHT,
+            collision_penalty=config.REWARD_COLLISION_PENALTY,
+            ground_penalty=config.REWARD_GROUND_PENALTY,
+            out_of_bounds_penalty=config.REWARD_OUT_OF_BOUNDS_PENALTY,
+            goal_bonus=config.REWARD_GOAL_BONUS,
+            return_components=True,
         )
 
-        # Bonus for reaching goal
-        dist_to_goal = np.linalg.norm(self.current_pos - self.goal)
-        if dist_to_goal < config.UAV_ARRIVE_DIST:
-            reward += 100.0
-
         self.prev_pos = self.current_pos.copy()
-        self.step_count += 1
+        self.prev_action = action.copy()
         self.trajectory.append(self.current_pos.copy())
-
-        # Check done conditions
-        done, reason = self._check_done(dist_to_goal)
 
         info = {
             "collision": has_collision,
             "collision_count": self.collision_count,
             "dist_to_goal": dist_to_goal,
+            "altitude": max(-float(self.current_pos[2]), 0.0),
             "reason": reason,
             "step": self.step_count,
+            "reward_components": reward_components,
+            "executed_action": action.copy(),
+            "local_target": world_target.copy(),
+            "local_target_obstacle_dist": min_dist,
         }
 
         obs = self._get_obs()
@@ -251,11 +289,10 @@ class UAVRLOEnv:
             for i, h_angle in enumerate(h_angles):
                 angle_deg = np.degrees(h_angle)
                 idx = int((angle_deg + 180) % 360) % 360
-                row = 2  # center row
-                for col in range(config.RANGE_RAYS_V):
-                    ray_idx = row * config.RANGE_RAYS_V + col
-                    if lidar_360[idx] < config.RANGE_MAX:
-                        distances[ray_idx] = lidar_360[idx]
+                center_v = config.RANGE_RAYS_V // 2
+                ray_idx = i * config.RANGE_RAYS_V + center_v
+                if lidar_360[idx] < config.RANGE_MAX:
+                    distances[ray_idx] = lidar_360[idx]
 
         # === Fill non-center rows with max range (single-line LiDAR can't provide vertical) ===
         # This is a limitation of the current sensor setup.
@@ -285,8 +322,9 @@ class UAVRLOEnv:
         """Simulate rangefinder distances against known obstacles."""
         distances = np.full(len(self.ray_directions), config.RANGE_MAX)
         origin = self.sim_pos
+        world_rays = self._rotate_body_rays_to_world(self.ray_directions, self.sim_yaw)
 
-        for i, direction in enumerate(self.ray_directions):
+        for i, direction in enumerate(world_rays):
             for obstacle_pos, obstacle_radius in self.sim_obstacles:
                 oc = origin - obstacle_pos
                 a = np.dot(direction, direction)
@@ -304,8 +342,9 @@ class UAVRLOEnv:
     def _update_planner_from_airsim(self):
         """Update planner voxel grid from AirSim sensor data."""
         ray_distances = self._get_rangefinder_airsim()
+        world_rays = self._rotate_body_rays_to_world(self.ray_directions, self.current_yaw)
         self.planner.update_obstacles(
-            self.current_pos, self.ray_directions, ray_distances,
+            self.current_pos, world_rays, ray_distances,
             max_range=config.RANGE_MAX,
         )
 
@@ -355,13 +394,14 @@ class UAVRLOEnv:
             yaw_rate = yaw_delta / 0.05
             yaw_rate = np.clip(yaw_rate, -np.pi, np.pi)
 
-            # Use body-frame velocity control with yaw toward movement direction
+            # The spline and AirSim state are both in world/NED coordinates, so
+            # execute world-frame velocities and only use yaw_mode for heading.
             try:
-                self.bridge.client.moveByVelocityBodyFrameAsync(
+                self.bridge.client.moveByVelocityAsync(
                     vx=float(vel_cmd[0]), vy=float(vel_cmd[1]),
                     vz=float(vel_cmd[2]), duration=0.05,
                     yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=float(yaw_rate)),
-                )
+                ).join()
             except Exception:
                 pass
 
@@ -409,6 +449,10 @@ class UAVRLOEnv:
             return True, "timeout"
 
         z = self.current_pos[2]
+        altitude = max(-float(z), 0.0)
+        if altitude <= 0.3:
+            return True, "ground"
+
         if z > config.UAV_ALTITUDE_MIN or z < -config.UAV_ALTITUDE_MAX * 2:
             return True, "out_of_bounds"
 

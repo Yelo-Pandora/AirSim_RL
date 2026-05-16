@@ -16,10 +16,8 @@ class ActorNetwork(nn.Module):
         # obs: (B, T, obs_dim) or (B, obs_dim)
         if obs.dim() == 2:
             obs = obs.unsqueeze(1)
-        B, T, _ = obs.shape
         x = F.relu(self.fc1(obs))
         x, hx = self.lstm(x, hx)
-        x = x.reshape(-1, x.shape[-1])
         mean = self.fc_mean(x)
         log_std = self.fc_log_std(x)
         log_std = torch.clamp(log_std, -20, 2)
@@ -39,11 +37,9 @@ class CriticNetwork(nn.Module):
             obs = obs.unsqueeze(1)
         if action.dim() == 2:
             action = action.unsqueeze(1)
-        B, T, _ = obs.shape
         x = torch.cat([obs, action], dim=-1)
         x = F.relu(self.fc1(x))
         x, hx = self.lstm(x, hx)
-        x = x.reshape(-1, x.shape[-1])
         q = self.fc_q(x)
         return q, hx
 
@@ -64,6 +60,7 @@ class ReplayBuffer:
         self.max_history = max_history
         self.buffer = []
         self.pos = 0
+        self.episode_id = 0
 
     def push(self, obs, action, reward, next_obs, done, hx=None):
         entry = {
@@ -72,30 +69,52 @@ class ReplayBuffer:
             "reward": reward,
             "next_obs": next_obs,
             "done": done,
-            "hx": (hx[0].detach(), hx[1].detach()) if hx is not None else None,
+            "episode_id": self.episode_id,
         }
         if len(self.buffer) < self.capacity:
             self.buffer.append(entry)
         else:
             self.buffer[self.pos] = entry
         self.pos = (self.pos + 1) % self.capacity
+        if done:
+            self.episode_id += 1
 
     def sample(self, batch_size):
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        batch = [self.buffer[i] for i in indices]
-        obs = torch.stack([torch.tensor(b["obs"], dtype=torch.float32) for b in batch])
-        action = torch.stack([torch.tensor(b["action"], dtype=torch.float32) for b in batch])
-        reward = torch.tensor([b["reward"] for b in batch], dtype=torch.float32).unsqueeze(-1)
-        next_obs = torch.stack([torch.tensor(b["next_obs"], dtype=torch.float32) for b in batch])
-        done = torch.tensor([b["done"] for b in batch], dtype=torch.float32).unsqueeze(-1)
-        hxs = [b["hx"] for b in batch if b["hx"] is not None]
-        if hxs:
-            h = torch.stack([h[0] for h in hxs], dim=1)
-            c = torch.stack([h[1] for h in hxs], dim=1)
-            hx = (h, c)
-        else:
-            hx = None
-        return obs, action, reward, next_obs, done, hx
+        valid_ends = [
+            i for i, b in enumerate(self.buffer)
+            if i > 0 and self.buffer[i - 1]["episode_id"] == b["episode_id"]
+        ]
+        if len(valid_ends) < batch_size:
+            valid_ends = list(range(len(self.buffer)))
+
+        end_indices = np.random.choice(valid_ends, batch_size, replace=False)
+        sequences = []
+        seq_len = 1
+        for end in end_indices:
+            ep = self.buffer[end]["episode_id"]
+            start = end
+            while (start > 0 and end - start + 1 < self.max_history
+                   and self.buffer[start - 1]["episode_id"] == ep):
+                start -= 1
+            sequences.append((start, end))
+            seq_len = max(seq_len, end - start + 1)
+
+        def pad_sequence(key, dtype=torch.float32):
+            rows = []
+            for start, end in sequences:
+                items = [self.buffer[i][key] for i in range(start, end + 1)]
+                pad_count = seq_len - len(items)
+                if pad_count:
+                    items = [items[0]] * pad_count + items
+                rows.append(torch.tensor(np.array(items), dtype=dtype))
+            return torch.stack(rows)
+
+        obs = pad_sequence("obs")
+        action = pad_sequence("action")
+        reward = pad_sequence("reward").unsqueeze(-1)
+        next_obs = pad_sequence("next_obs")
+        done = pad_sequence("done").unsqueeze(-1)
+        return obs, action, reward, next_obs, done
 
     def __len__(self):
         return len(self.buffer)
@@ -132,28 +151,51 @@ class RSPGAgent:
         self.batch_size = config.RSPG_BATCH_SIZE
         self.grad_clip = config.RSPG_GRAD_CLIP
         self.target_entropy = config.RSPG_TARGET_ENTROPY
+        self.action_pos_max = config.ACTION_POS_MAX
+        self.action_angle_max = np.pi
 
     @property
     def alpha(self):
         return torch.exp(self.log_alpha)
 
+    def _scale_action(self, raw_action):
+        squashed = torch.tanh(raw_action)
+        pos = squashed[..., :3] * self.action_pos_max
+        angles = squashed[..., 3:] * self.action_angle_max
+        return torch.cat([pos, angles], dim=-1), squashed
+
+    def _sample_policy_action(self, mean, log_std, deterministic=False):
+        if deterministic:
+            raw_action = mean
+            action, _ = self._scale_action(raw_action)
+            return action, None
+
+        std = log_std.exp()
+        dist = torch.distributions.Normal(mean, std)
+        raw_action = dist.rsample()
+        action, squashed = self._scale_action(raw_action)
+
+        scale = torch.ones_like(action)
+        scale[..., :3] *= self.action_pos_max
+        scale[..., 3:] *= self.action_angle_max
+        log_prob = dist.log_prob(raw_action) - torch.log(
+            scale * (1.0 - squashed.pow(2)) + 1e-6
+        )
+        log_prob = log_prob.sum(-1, keepdim=True)
+        return action, log_prob
+
     def select_action(self, obs, hx=None, deterministic=False):
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            mean, log_std, hx_out = self.actor(obs_tensor.unsqueeze(0), hx)
-        if deterministic:
-            action = mean
-        else:
-            std = log_std.exp()
-            dist = torch.distributions.Normal(mean, std)
-            action = dist.rsample()
-        return action.squeeze(0).cpu().numpy(), hx_out
+            mean, log_std, hx_out = self.actor(obs_tensor.view(1, 1, -1), hx)
+            action, _ = self._sample_policy_action(mean, log_std, deterministic)
+        return action[0, -1].cpu().numpy(), hx_out
 
     def update(self):
         if len(self.replay_buffer) < self.batch_size:
             return
 
-        obs, action, reward, next_obs, done, hx = self.replay_buffer.sample(self.batch_size)
+        obs, action, reward, next_obs, done = self.replay_buffer.sample(self.batch_size)
         obs = obs.to(self.device)
         action = action.to(self.device)
         reward = reward.to(self.device)
@@ -163,10 +205,7 @@ class RSPGAgent:
         # Critic update
         with torch.no_grad():
             next_mean, next_log_std, _ = self.target_actor(next_obs)
-            std = next_log_std.exp()
-            next_dist = torch.distributions.Normal(next_mean, std)
-            next_action = next_dist.rsample()
-            next_log_prob = next_dist.log_prob(next_action).sum(-1, keepdim=True)
+            next_action, next_log_prob = self._sample_policy_action(next_mean, next_log_std)
 
             q1_next, _ = self.target_critic_1(next_obs, next_action)
             q2_next, _ = self.target_critic_2(next_obs, next_action)
@@ -185,10 +224,7 @@ class RSPGAgent:
 
         # Actor update
         mean, log_std, _ = self.actor(obs)
-        std = log_std.exp()
-        dist = torch.distributions.Normal(mean, std)
-        sampled_action = dist.rsample()
-        log_prob = dist.log_prob(sampled_action).sum(-1, keepdim=True)
+        sampled_action, log_prob = self._sample_policy_action(mean, log_std)
 
         q1_pi, _ = self.critic_1(obs, sampled_action)
         q2_pi, _ = self.critic_2(obs, sampled_action)
@@ -235,4 +271,5 @@ class RSPGAgent:
         self.target_critic_2.load_state_dict(checkpoint["target_critic_2"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
-        self.log_alpha = checkpoint["log_alpha"]
+        self.log_alpha = checkpoint["log_alpha"].to(self.device).detach().requires_grad_(True)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=self.alpha_optimizer.param_groups[0]["lr"])
