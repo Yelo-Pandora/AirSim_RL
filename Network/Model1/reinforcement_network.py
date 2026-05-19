@@ -130,21 +130,21 @@ class AirSimUAVEnv(gym.Env):
         self.waypoints = []                                                         # 设置的中途点的坐标
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)                # 15个中间点 + 1个终点
         self.current_yaw_deg = 0.0
-        self.max_speed_xy = 7.5
+        self.max_velocity = 10.0
         self.max_speed_z = 3.0
-        self.goal_xy_slow_radius = 6.0
         self.goal_xy_hold_radius = 3.0
-        self.goal_xy_min_scale = 0.35
         self.goal_z_hold_tolerance = 1.0
         self.goal_z_reward_radius = 5.0
         self.z_hold_kp = 0.85
         self.z_hold_damping = 0.35
+        self.lidar_clearance_weight = 1.3
         self.last_commanded_yaw_deg = 0.0
         self.yaw_align_speed_on = 0.2
         self.yaw_align_speed_off = 0.1
         self.max_yaw_step_deg = 20.0
         self.depth_norm_max = 20.0
         self.lidar_norm_max = 20.0
+        self.current_lidar_min_dist = self.lidar_norm_max
         self.position_norm_max = 80.0
         self.velocity_norm_max = 10.0
         self.angular_acc_norm_max = 10.0
@@ -244,32 +244,14 @@ class AirSimUAVEnv(gym.Env):
     def _wrap_angle_deg(angle_deg):
         return ((angle_deg + 180.0) % 360.0) - 180.0
 
-    @staticmethod
-    def _limit_xy_speed(target_vel, max_speed_xy):
-        # 仅限制水平面速度，垂直速度单独裁剪
-        limited = np.asarray(target_vel, dtype=np.float32).copy()
-        xy_speed = float(np.linalg.norm(limited[:2]))
-        if xy_speed > max_speed_xy and xy_speed > 1e-6:
-            limited[:2] = limited[:2] / xy_speed * float(max_speed_xy)
-        return limited
-
     def _refine_target_velocity(self, target_vel, rel_pos):
-        # 网络输出的是加速度，这里先积分成目标速度，再做执行层整形
+        # 默认保留加速度积分后的目标速度，不额外做近终点速度缩放
         refined = np.asarray(target_vel, dtype=np.float32).copy()
         xy_dist = float(np.linalg.norm(rel_pos[:2]))
         z_error = float(rel_pos[2])
         z_dist = abs(z_error)
 
-        # 先做一次全局速度约束，避免单步积分后的速度过激
-        refined = self._limit_xy_speed(refined, self.max_speed_xy)
-        refined[2] = float(np.clip(refined[2], -self.max_speed_z, self.max_speed_z))
-
-        if xy_dist < self.goal_xy_slow_radius:
-            # 接近目标后主动降低水平速度，减少平面冲过头
-            xy_scale = float(np.clip(xy_dist / self.goal_xy_slow_radius, self.goal_xy_min_scale, 1.0))
-            refined[:2] *= xy_scale
-
-        # 用相对高度误差和当前竖直速度构造一个阻尼式的 z 轴修正速度
+        # 近目标且高度误差仍较大时，仅修正竖直速度
         desired_z_vel = np.clip(
             self.z_hold_kp * z_error - self.z_hold_damping * float(self.current_velocity[2]),
             -self.max_speed_z,
@@ -277,17 +259,13 @@ class AirSimUAVEnv(gym.Env):
         )
 
         if xy_dist < self.goal_xy_hold_radius and z_dist > self.goal_z_hold_tolerance:
-            # 已接近目标水平位置但高度还没对齐时，优先收敛 z 轴
-            focus = float(np.clip((self.goal_xy_hold_radius - xy_dist) / self.goal_xy_hold_radius, 0.0, 1.0))
-            refined[:2] *= 1.0 - 0.75 * focus
-            refined[2] = float((1.0 - focus) * refined[2] + focus * desired_z_vel)
-        elif z_dist < self.goal_z_hold_tolerance:
-            # 高度基本对齐后，削弱 z 轴动作，避免来回抖动
-            refined[2] *= 0.5
+            refined[2] = float(desired_z_vel)
 
-        # 整形结束后再做一次裁剪，保证最终发给 AirSim 的速度满足上限
-        refined = self._limit_xy_speed(refined, self.max_speed_xy)
-        refined[2] = float(np.clip(refined[2], -self.max_speed_z, self.max_speed_z))
+        # 保留原始实现的三维总速度上限裁剪，避免 z 修正后突破 max_v
+        speed = float(np.linalg.norm(refined))
+        if speed > self.max_velocity and speed > 1e-6:
+            refined = refined / speed * self.max_velocity
+
         return refined
 
     @staticmethod
@@ -408,7 +386,9 @@ class AirSimUAVEnv(gym.Env):
         self.current_dis_z_top = float(dis_z_top)
 
         depth_obs = self._normalize_depth_obs(self.downsample_depth(raw_depth)).squeeze(0).cpu().numpy()
-        lidar_obs = self._normalize_lidar_obs(self.downsample_lidar(raw_lidar)).cpu().numpy()
+        downsampled_lidar = self.downsample_lidar(raw_lidar)
+        self.current_lidar_min_dist = float(torch.min(downsampled_lidar).item())
+        lidar_obs = self._normalize_lidar_obs(downsampled_lidar).cpu().numpy()
         kin_obs = self._normalize_kinematics_obs(kin_data)
 
         return {
@@ -428,7 +408,7 @@ class AirSimUAVEnv(gym.Env):
             self.current_velocity,
             commanded_accel,
             dt=self.dt,
-            max_v=10.0,
+            max_v=self.max_velocity,
         )
         # 先按加速度积分，再根据目标距离做执行层速度整形
         target_vel = self._refine_target_velocity(raw_target_vel, rel_pos_before)
@@ -537,6 +517,7 @@ class AirSimUAVEnv(gym.Env):
             'angle_to_target': angle_to_target,
             'dis_z_bottom': dis_z_bottom,
             'dis_z_top': dis_z_top,
+            'lidar_min_dist': self.current_lidar_min_dist,
             'angular_acc': angular_acc,
             'v_magnitude': v_magnitude,
             'perpendicular_dist': perpendicular_dist,
@@ -873,7 +854,16 @@ class AirSimUAVEnv(gym.Env):
             r_z_top = 0
         # 总距离奖励
         r_z = r_z_bottom + r_z_top
-        r_collision = r_failure + r_z
+        lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
+        if 0.5 <= lidar_min_dist < 1:
+            r_lidar_clearance = -0.05 * self.lidar_clearance_weight
+        elif 0.3 <= lidar_min_dist < 0.5:
+            r_lidar_clearance = -0.1 * self.lidar_clearance_weight
+        elif lidar_min_dist < 0.3:
+            r_lidar_clearance = (-0.2 / lidar_min_dist) * self.lidar_clearance_weight
+        else:
+            r_lidar_clearance = 0
+        r_collision = r_failure + r_z + r_lidar_clearance
 
         # R_stabilization (公式 14)
         # 角加速度稳定性奖励
