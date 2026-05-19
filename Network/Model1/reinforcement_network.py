@@ -130,6 +130,15 @@ class AirSimUAVEnv(gym.Env):
         self.waypoints = []                                                         # 设置的中途点的坐标
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)                # 15个中间点 + 1个终点
         self.current_yaw_deg = 0.0
+        self.max_speed_xy = 7.5
+        self.max_speed_z = 3.0
+        self.goal_xy_slow_radius = 6.0
+        self.goal_xy_hold_radius = 3.0
+        self.goal_xy_min_scale = 0.35
+        self.goal_z_hold_tolerance = 1.0
+        self.goal_z_reward_radius = 5.0
+        self.z_hold_kp = 0.85
+        self.z_hold_damping = 0.35
         self.last_commanded_yaw_deg = 0.0
         self.yaw_align_speed_on = 0.2
         self.yaw_align_speed_off = 0.1
@@ -235,18 +244,84 @@ class AirSimUAVEnv(gym.Env):
     def _wrap_angle_deg(angle_deg):
         return ((angle_deg + 180.0) % 360.0) - 180.0
 
+    @staticmethod
+    def _limit_xy_speed(target_vel, max_speed_xy):
+        # 仅限制水平面速度，垂直速度单独裁剪
+        limited = np.asarray(target_vel, dtype=np.float32).copy()
+        xy_speed = float(np.linalg.norm(limited[:2]))
+        if xy_speed > max_speed_xy and xy_speed > 1e-6:
+            limited[:2] = limited[:2] / xy_speed * float(max_speed_xy)
+        return limited
+
+    def _refine_target_velocity(self, target_vel, rel_pos):
+        # 网络输出的是加速度，这里先积分成目标速度，再做执行层整形
+        refined = np.asarray(target_vel, dtype=np.float32).copy()
+        xy_dist = float(np.linalg.norm(rel_pos[:2]))
+        z_error = float(rel_pos[2])
+        z_dist = abs(z_error)
+
+        # 先做一次全局速度约束，避免单步积分后的速度过激
+        refined = self._limit_xy_speed(refined, self.max_speed_xy)
+        refined[2] = float(np.clip(refined[2], -self.max_speed_z, self.max_speed_z))
+
+        if xy_dist < self.goal_xy_slow_radius:
+            # 接近目标后主动降低水平速度，减少平面冲过头
+            xy_scale = float(np.clip(xy_dist / self.goal_xy_slow_radius, self.goal_xy_min_scale, 1.0))
+            refined[:2] *= xy_scale
+
+        # 用相对高度误差和当前竖直速度构造一个阻尼式的 z 轴修正速度
+        desired_z_vel = np.clip(
+            self.z_hold_kp * z_error - self.z_hold_damping * float(self.current_velocity[2]),
+            -self.max_speed_z,
+            self.max_speed_z,
+        )
+
+        if xy_dist < self.goal_xy_hold_radius and z_dist > self.goal_z_hold_tolerance:
+            # 已接近目标水平位置但高度还没对齐时，优先收敛 z 轴
+            focus = float(np.clip((self.goal_xy_hold_radius - xy_dist) / self.goal_xy_hold_radius, 0.0, 1.0))
+            refined[:2] *= 1.0 - 0.75 * focus
+            refined[2] = float((1.0 - focus) * refined[2] + focus * desired_z_vel)
+        elif z_dist < self.goal_z_hold_tolerance:
+            # 高度基本对齐后，削弱 z 轴动作，避免来回抖动
+            refined[2] *= 0.5
+
+        # 整形结束后再做一次裁剪，保证最终发给 AirSim 的速度满足上限
+        refined = self._limit_xy_speed(refined, self.max_speed_xy)
+        refined[2] = float(np.clip(refined[2], -self.max_speed_z, self.max_speed_z))
+        return refined
+
+    @staticmethod
+    def _resolve_end_reason(info, terminated=False, truncated=False):
+        # 统一回合结束原因，便于测试脚本和终端显示复用
+        if info.get('arrived', False):
+            return "arrived"
+        if info.get('collision', False):
+            return "collision"
+        if info.get('out_of_ceiling', False):
+            return "out_of_ceiling"
+        if info.get('crossed_border', False):
+            return "crossed_border"
+        if truncated:
+            return "timeout"
+        if terminated:
+            return "terminated"
+        return "running"
+
     def _compute_soft_aligned_yaw_deg(self, target_vel):
         # yaw 对齐的是积分后的期望水平速度方向，而不是 raw action 本身。
+        # yaw 对齐的是积分后的目标水平速度方向，而不是原始动作本身
         speed_xy = float(np.linalg.norm(target_vel[:2]))
         commanded_yaw = float(self.last_commanded_yaw_deg)
 
         if speed_xy >= self.yaw_align_speed_on:
             desired_yaw_deg = math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0])))
         elif speed_xy <= self.yaw_align_speed_off:
+            # 低速时保持上一次朝向，避免机头在近零速度附近抖动
             desired_yaw_deg = commanded_yaw
         else:
             desired_yaw_deg = commanded_yaw
 
+        # 每个控制周期限制最大偏航变化量，让转向更平滑
         yaw_delta = self._wrap_angle_deg(desired_yaw_deg - float(self.current_yaw_deg))
         yaw_delta = float(np.clip(yaw_delta, -self.max_yaw_step_deg, self.max_yaw_step_deg))
         commanded_yaw = self._wrap_angle_deg(float(self.current_yaw_deg) + yaw_delta)
@@ -344,15 +419,19 @@ class AirSimUAVEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
+        rel_pos_before = self.current_rel_pos.copy()
+        prev_z_dist = abs(float(rel_pos_before[2]))
 
         # 动作先映射为加速度命令，再在一个 RL 控制周期内积分成末端目标速度。
         commanded_accel = action_to_acceleration(action, accel_scale=self.accel_scale)
-        target_vel = integrate_velocity_with_acceleration(
+        raw_target_vel = integrate_velocity_with_acceleration(
             self.current_velocity,
             commanded_accel,
             dt=self.dt,
             max_v=10.0,
         )
+        # 先按加速度积分，再根据目标距离做执行层速度整形
+        target_vel = self._refine_target_velocity(raw_target_vel, rel_pos_before)
 
 
         # AirSim 边界仍复用速度接口，但这里的 target_vel 已经来自加速度语义积分。
@@ -427,6 +506,8 @@ class AirSimUAVEnv(gym.Env):
         # 是否到达终点位置
         xy_dist = float(np.linalg.norm(rel_pos[:2]))
         z_dist = abs(float(rel_pos[2]))
+        # z_progress > 0 表示这一动作让高度更接近目标
+        z_progress = prev_z_dist - z_dist
         arrived = bool(xy_dist < 1.5 and z_dist < 2.0)
 
         if self.start_dist > 1e-5:
@@ -449,6 +530,9 @@ class AirSimUAVEnv(gym.Env):
             'passed_waypoint': passed_waypoint_id,
             'is_first_arrival': is_first_arrival,
             'dis2goal': dis2goal,
+            'xy_dist': xy_dist,
+            'z_dist': z_dist,
+            'z_progress': z_progress,
             'progress': progress,  # 将进度传给 reward 计算函数
             'angle_to_target': angle_to_target,
             'dis_z_bottom': dis_z_bottom,
@@ -461,6 +545,7 @@ class AirSimUAVEnv(gym.Env):
         reward = self._calculate_reward(info)
         terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
+        info['end_reason'] = self._resolve_end_reason(info, terminated=terminated, truncated=truncated)
         if terminated or truncated:
             if info['arrived']:
                 self.consecutive_arrivals += 1
@@ -718,7 +803,8 @@ class AirSimUAVEnv(gym.Env):
     def _calculate_reward(self, info):
         """按照论文公式 (2)-(14) 实现"""
         progress = info.get('progress', 0.0)
-        r_progress = 25.0 * progress
+        # 降低 progress 权重，避免策略只顾在平面上猛冲
+        r_progress = 5.0 * progress
 
         # R_path (公式 8)
         # 接近程度奖励
@@ -747,9 +833,21 @@ class AirSimUAVEnv(gym.Env):
         else:
             r_direction = -0.5 * (a_abs / 180.0)
 
-        # 保持原有 crossed_border 终止/惩罚机制，不在这里加入连续偏航越界惩罚。
+        # crossed_border 终止/惩罚机制
         r_border = -400 if info['crossed_border'] else 0
-        r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border
+        # 接近目标时的z轴惩罚
+        xy_dist = info.get('xy_dist', info['dis2goal'])
+        z_dist = info.get('z_dist', 0.0)
+        z_progress = info.get('z_progress', 0.0)
+        if xy_dist < self.goal_z_reward_radius:
+            # 已接近目标水平位置时，强化高度误差惩罚
+            r_vertical_error = -0.8 * z_dist
+        else:
+            # 远离目标时仍保留 z 约束，但惩罚更轻
+            r_vertical_error = -0.2 * min(z_dist, 6.0)
+        # 同时鼓励单步 z 误差持续变小
+        r_vertical = 6.0 * z_progress + r_vertical_error
+        r_path = 1.5 * r_proximity + r_step + r_direction + r_arrive + r_border + r_vertical
 
         # R_collision (公式 11)
         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
@@ -799,7 +897,7 @@ class AirSimUAVEnv(gym.Env):
         在终端实时格式化输出无人机飞行状态仪表盘
         """
         # 实际使用的加速度命令
-        actual_acc = action_to_acceleration(action)
+        actual_acc = action_to_acceleration(action, accel_scale=self.accel_scale)
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
         print(f"\r[Step {self.step_count:4d} | Total {self.total_train_steps:7d}] "
@@ -812,7 +910,14 @@ class AirSimUAVEnv(gym.Env):
 
         # 当一个回合结束（撞机、到达终点或超时）时，打印一个换行符，以免下一回合的输出挤在一起
         if terminated or truncated:
-            end_reason = "ARRIVED!" if info['arrived'] else ("CRASHED!" if info['collision'] else "TIMEOUT!")
+            end_reason = {
+                "arrived": "ARRIVED!",
+                "collision": "CRASHED!",
+                "out_of_ceiling": "TOO HIGH!",
+                "crossed_border": "OUT OF BOUNDS!",
+                "timeout": "TIMEOUT!",
+                "terminated": "TERMINATED!",
+            }.get(info.get('end_reason', 'timeout'), "TIMEOUT!")
             print(f" -> Episode End: {end_reason}")
 
 
