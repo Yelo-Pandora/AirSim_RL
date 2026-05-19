@@ -93,6 +93,7 @@ TRAIN_SAVE_INTERVAL = 100    # save model every N episodes
 TRAIN_LOG_INTERVAL = 1       # log metrics every N episodes
 TRAIN_SEED = 42              # random seed
 TRAIN_UPDATE_INTERVAL = 100  # replay/update cadence from the paper
+TRAIN_REWARD_WINDOW = 250    # paper-style rolling reward window
 
 # ============== Paths ==============
 MODEL_SAVE_DIR = "models/saved_models"

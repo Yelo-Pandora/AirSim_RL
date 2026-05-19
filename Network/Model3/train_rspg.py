@@ -82,7 +82,11 @@ def train(args):
 
     episode_rewards = []
     success_count = 0
+    collision_count = 0
+    trapped_count = 0
     reason_counts = {}
+    metrics_header_written = os.path.exists(config.TRAIN_METRICS_CSV)
+    train_start_time = time.time()
 
     for episode in range(start_episode, max_episodes):
         if global_steps >= total_timestep_budget:
@@ -134,37 +138,35 @@ def train(args):
 
         # Logging
         if (episode + 1) % config.TRAIN_LOG_INTERVAL == 0:
-            success_rate = success_count / (episode + 1) * 100
-            avg_reward = np.mean(episode_rewards[-50:]) if len(episode_rewards) >= 50 else np.mean(episode_rewards)
+            episodes_seen = max(len(episode_rewards), 1)
+            success_rate = success_count / episodes_seen * 100
+            collision_rate = collision_count / episodes_seen * 100
+            trapped_rate = trapped_count / episodes_seen * 100
+            reward_window = getattr(config, "TRAIN_REWARD_WINDOW", 250)
+            avg_reward = np.mean(episode_rewards[-reward_window:])
+            elapsed = max(time.time() - train_start_time, 1e-6)
+            steps_per_sec = global_steps / elapsed
             component_log = " ".join(
                 f"{key}:{value:.1f}" for key, value in sorted(reward_component_sums.items())
             )
-            print(f"Episode {episode + 1}/{config.TRAIN_EPISODES} | "
-                  f"Reward: {episode_reward:.2f} | Avg(50): {avg_reward:.2f} | "
-                  f"Success: {success_rate:.1f}% | "
-                  f"Steps: {step} | "
-                  f"Reason: {reason} | "
-                  f"Dist: {info.get('dist_to_goal', float('nan')):.2f}m | "
-                  f"Alt: {info.get('altitude', float('nan')):.2f}m | "
-                  f"Collisions: {info.get('collision_count', 0)} | "
-                  f"Alpha: {agent.alpha.item():.4f} | "
-                  f"R[{component_log}]")
-
             print(
                 f"Episode {episode + 1}/{max_episodes} | "
                 f"GlobalSteps: {global_steps}/{total_timestep_budget} | "
-                f"Reward: {episode_reward:.2f} | Avg({config.TRAIN_REWARD_WINDOW}): {avg_reward:.2f} | "
+                f"Reward: {episode_reward:.2f} | Avg({reward_window}): {avg_reward:.2f} | "
                 f"Success: {success_rate:.1f}% | Collision: {collision_rate:.1f}% | Trapped: {trapped_rate:.1f}% | "
                 f"Steps: {step} | Reason: {reason} | "
+                f"Dist: {info.get('dist_to_goal', float('nan')):.2f}m | "
+                f"Alt: {info.get('altitude', float('nan')):.2f}m | "
                 f"StartRegion: {info.get('start_region')} -> GoalRegion: {info.get('goal_region')} | "
-                f"Alpha: {agent.alpha.item():.4f} | SPS: {steps_per_sec:.2f}"
+                f"Alpha: {agent.alpha.item():.4f} | SPS: {steps_per_sec:.2f} | "
+                f"R[{component_log}]"
             )
 
             metrics_row = {
                 "episode": episode + 1,
                 "global_steps": global_steps,
                 "episode_reward": round(float(episode_reward), 6),
-                f"avg_reward_{config.TRAIN_REWARD_WINDOW}": round(avg_reward, 6),
+                f"avg_reward_{reward_window}": round(avg_reward, 6),
                 "success_rate": round(success_rate, 4),
                 "collision_rate": round(collision_rate, 4),
                 "trapped_rate": round(trapped_rate, 4),
@@ -191,7 +193,7 @@ def train(args):
     agent.save(final_path)
     total_episodes_run = max(len(episode_rewards), 1)
     print(f"\nTraining complete. Final model saved to {final_path}")
-    print(f"Overall success rate: {success_count / config.TRAIN_EPISODES * 100:.1f}%")
+    print(f"Overall success rate: {success_count / total_episodes_run * 100:.1f}%")
     print(f"Termination reasons: {reason_counts}")
 
 

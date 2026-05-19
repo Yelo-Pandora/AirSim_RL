@@ -120,7 +120,7 @@ class ReplayBuffer:
         return obs, action, reward, next_obs, done
 
     def __len__(self):
-        return self.num_transitions
+        return len(self.buffer)
 
 
 class RSPGAgent:
@@ -161,6 +161,7 @@ class RSPGAgent:
         self.target_entropy = config.RSPG_TARGET_ENTROPY
         self.action_pos_max = config.ACTION_POS_MAX
         self.action_angle_max = np.pi
+        self.action_dim = action_dim
 
     @property
     def alpha(self):
@@ -261,42 +262,20 @@ class RSPGAgent:
         reward = reward.to(self.device)
         next_obs = next_obs.to(self.device)
         done = done.to(self.device)
-        mask = mask.to(self.device)
-
-        normalizer = mask.sum().clamp_min(1.0)
-        actor_hx = self._compute_burn_in_hidden_actor(self.actor, burn_in_obs, burn_in_mask)
-        target_actor_hx = self._compute_burn_in_hidden_actor(self.target_actor, burn_in_obs, burn_in_mask)
-        critic1_hx = self._compute_burn_in_hidden_critic(self.critic_1, burn_in_obs, burn_in_actions, burn_in_mask)
-        critic2_hx = self._compute_burn_in_hidden_critic(self.critic_2, burn_in_obs, burn_in_actions, burn_in_mask)
-        target_critic1_hx = self._compute_burn_in_hidden_critic(
-            self.target_critic_1, burn_in_obs, burn_in_actions, burn_in_mask
-        )
-        target_critic2_hx = self._compute_burn_in_hidden_critic(
-            self.target_critic_2, burn_in_obs, burn_in_actions, burn_in_mask
-        )
+        batch_size, seq_len = obs.shape[:2]
 
         with torch.no_grad():
             next_mean, next_log_std, _ = self.target_actor(next_obs)
             next_action, next_log_prob = self._sample_policy_action(next_mean, next_log_std)
 
-            q1_next, _ = self.target_critic_1(next_obs, next_action, target_critic1_hx)
-            q2_next, _ = self.target_critic_2(next_obs, next_action, target_critic2_hx)
-
-            q1_next = q1_next.view(self.batch_size, self.train_seq_len, 1)
-            q2_next = q2_next.view(self.batch_size, self.train_seq_len, 1)
-            next_log_prob = next_log_prob.view(self.batch_size, self.train_seq_len, 1)
-
+            q1_next, _ = self.target_critic_1(next_obs, next_action)
+            q2_next, _ = self.target_critic_2(next_obs, next_action)
             q_next = torch.min(q1_next, q2_next)
             target_q = reward + (1 - done) * self.gamma * (q_next - self.alpha.detach() * next_log_prob)
 
-        q1, _ = self.critic_1(obs, action, critic1_hx)
-        q2, _ = self.critic_2(obs, action, critic2_hx)
-        q1 = q1.view(self.batch_size, self.train_seq_len, 1)
-        q2 = q2.view(self.batch_size, self.train_seq_len, 1)
-
-        critic_loss = (
-            (((q1 - target_q) ** 2) + ((q2 - target_q) ** 2)) * mask
-        ).sum() / normalizer
+        q1, _ = self.critic_1(obs, action)
+        q2, _ = self.critic_2(obs, action)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -308,21 +287,18 @@ class RSPGAgent:
         mean, log_std, _ = self.actor(obs)
         sampled_action, log_prob = self._sample_policy_action(mean, log_std)
 
-        q1_pi, _ = self.critic_1(obs, sampled_action, critic1_hx)
-        q2_pi, _ = self.critic_2(obs, sampled_action, critic2_hx)
+        q1_pi, _ = self.critic_1(obs, sampled_action)
+        q2_pi, _ = self.critic_2(obs, sampled_action)
         q_pi = torch.min(q1_pi, q2_pi)
 
-        q_pi = q_pi.view(self.batch_size, self.train_seq_len, 1)
-        log_prob = log_prob.view(self.batch_size, self.train_seq_len, 1)
-
-        actor_loss = ((self.alpha.detach() * log_prob - q_pi) * mask).sum() / normalizer
+        actor_loss = (self.alpha.detach() * log_prob - q_pi).mean()
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.grad_clip)
         self.actor_optimizer.step()
 
-        alpha_loss = (-(self.log_alpha * (log_prob + self.target_entropy).detach()) * mask).sum() / normalizer
+        alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()

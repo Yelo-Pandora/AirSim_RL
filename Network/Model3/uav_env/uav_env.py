@@ -73,6 +73,10 @@ class UAVRLOEnv:
         self.sim_obstacles = []  # Always initialized, used in both modes
         self.prev_yaw = 0.0  # For computing yaw rate
         self.prev_action = None
+        self.last_local_target = None
+        self.current_episode = 0
+        self.total_train_steps = 0
+        self.dataset_points_by_region = self._load_dataset_points()
 
     def _rotate_body_rays_to_world(self, ray_directions, yaw):
         """Rotate body-frame sensor rays into the world frame around z."""
@@ -291,13 +295,7 @@ class UAVRLOEnv:
         if min_dist is None:
             min_dist = config.RANGE_MAX
 
-        # Plan trajectory with EGO-Planner
-        spline = self.planner.plan(
-            current_pos=self.current_pos,
-            current_vel=self.current_vel,
-            local_target=np.concatenate([world_target, target_angles]),
-        )
-
+        has_collision = False
         if self.planner_mode == "ego":
             spline = self.planner.plan(
                 current_pos=self.current_pos,
@@ -317,7 +315,12 @@ class UAVRLOEnv:
             else:
                 self._execute_trajectory_sim(spline)
         else:
-            self._execute_trajectory_sim(spline)
+            if self.use_airsim:
+                has_collision = self._execute_straight_airsim(world_target)
+            else:
+                has_collision = self._execute_straight_sim(world_target)
+            if has_collision:
+                self.collision_count += 1
 
         dist_to_goal = np.linalg.norm(self.current_pos - self.goal)
         self.step_count += 1
@@ -361,6 +364,8 @@ class UAVRLOEnv:
             "executed_action": action.copy(),
             "local_target": world_target.copy(),
             "local_target_obstacle_dist": min_dist,
+            "start_region": self.start_region,
+            "goal_region": self.goal_region,
         }
 
         self.last_local_target = world_target.astype(np.float32).copy()
@@ -437,28 +442,26 @@ class UAVRLOEnv:
                 lidar_data = None
 
         if lidar_data is not None:
-            # Build 360-bin horizontal distance array (same as Model1)
-            lidar_360 = self._lidar_to_360(lidar_data.point_cloud)
-            # Sample 5 horizontal angles for the center row of our 5x5 grid
-            h_angles = np.linspace(
-                -np.radians(config.RANGE_HFOV / 2),
-                np.radians(config.RANGE_HFOV / 2),
-                config.RANGE_RAYS_H,
-            )
-            # LiDAR angle 0 = forward, maps to index ~180 (or 0 depending on convention)
-            for i, h_angle in enumerate(h_angles):
-                angle_deg = np.degrees(h_angle)
-                idx = int((angle_deg + 180) % 360) % 360
-                center_v = config.RANGE_RAYS_V // 2
-                ray_idx = i * config.RANGE_RAYS_V + center_v
-                if lidar_360[idx] < config.RANGE_MAX:
-                    distances[ray_idx] = lidar_360[idx]
-
-        # === Fill non-center rows with max range (single-line LiDAR can't provide vertical) ===
-        # This is a limitation of the current sensor setup.
-        # For full 5x5 coverage, add a multi-channel LiDAR to settings.json.
+            distances = self._project_lidar_to_rays(lidar_data.point_cloud)
 
         return distances
+
+    def _lidar_to_360(self, point_cloud):
+        """Compatibility helper for older single-line LiDAR code paths."""
+        bins = np.ones(360, dtype=np.float32) * config.RANGE_MAX
+        if len(point_cloud) < 3:
+            return bins
+
+        points = np.array(point_cloud, dtype=np.float32).reshape(-1, 3)
+        for pt in points:
+            dist = float(np.linalg.norm(pt[:2]))
+            if dist < 1e-3 or dist > config.RANGE_MAX:
+                continue
+            angle = np.degrees(np.arctan2(pt[1], pt[0]))
+            idx = int((angle + 180) % 360) % 360
+            if dist < bins[idx]:
+                bins[idx] = dist
+        return bins
 
     def _project_lidar_to_rays(self, point_cloud):
         """Map AirSim LiDAR point cloud onto the 25 sensing directions used by the paper."""
@@ -592,28 +595,14 @@ class UAVRLOEnv:
             error_world = target_pos - self.current_pos
             vx, vy, vz, yaw_rate = self._compute_forward_flight_command(error_world, max_speed)
 
-            # Compute target yaw from movement direction so sensors face travel direction
-            if np.linalg.norm(vel_cmd[:2]) > 0.1:
-                target_yaw = np.arctan2(vel_cmd[1], vel_cmd[0])
-            else:
-                target_yaw = self.current_yaw
-
-            # Compute yaw rate for smooth rotation
-            yaw_delta = target_yaw - self.current_yaw
-            while yaw_delta > np.pi:
-                yaw_delta -= 2 * np.pi
-            while yaw_delta < -np.pi:
-                yaw_delta += 2 * np.pi
-            yaw_rate = yaw_delta / 0.05
-            yaw_rate = np.clip(yaw_rate, -np.pi, np.pi)
-
-            # The spline and AirSim state are both in world/NED coordinates, so
-            # execute world-frame velocities and only use yaw_mode for heading.
             try:
-                self.bridge.client.moveByVelocityAsync(
-                    vx=float(vel_cmd[0]), vy=float(vel_cmd[1]),
-                    vz=float(vel_cmd[2]), duration=0.05,
+                self.bridge.client.moveByVelocityBodyFrameAsync(
+                    vx=float(vx),
+                    vy=float(vy),
+                    vz=float(vz),
+                    duration=0.05,
                     yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=float(yaw_rate)),
+                    vehicle_name=self.vehicle_name,
                 ).join()
             except Exception:
                 pass
@@ -651,6 +640,9 @@ class UAVRLOEnv:
             self.current_pos = state["position"].copy()
             self.current_vel = state["velocity"].copy()
             self.current_pitch, self.current_yaw = self._get_attitude_from_airsim()
+            if self._check_collision_airsim():
+                return True
+        return False
 
     def _execute_trajectory_sim(self, spline):
         """Execute B-spline trajectory in simulation with forward-only kinematics."""
