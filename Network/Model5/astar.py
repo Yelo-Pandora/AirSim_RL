@@ -58,8 +58,37 @@ def _reconstruct(came_from, current):
     return path
 
 
-def simplify_path(cells):
-    """Keep only turning points from a grid path."""
+def _line_of_sight(grid, cell_a, cell_b):
+    """Bresenham line check: True if all cells between A and B are free."""
+    x0, y0 = cell_a
+    x1, y1 = cell_b
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    x, y = x0, y0
+    while True:
+        if (x, y) != cell_a and (x, y) != cell_b and not grid.is_free((x, y)):
+            return False
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+    return True
+
+
+def simplify_path(cells, grid=None):
+    """Keep only turning points from a grid path, with line-of-sight validation.
+
+    When grid is provided, straight-line segments between turning points are
+    validated against obstacles to prevent cutting through buildings.
+    """
     if not cells or len(cells) <= 2:
         return cells or []
 
@@ -72,5 +101,20 @@ def simplify_path(cells):
             simplified.append(cells[i])
             direction = new_direction
     simplified.append(cells[-1])
+
+    # Validate and repair: if any segment cuts through obstacles, re-insert
+    # the intermediate grid cells that were removed.
+    if grid is not None and len(simplified) > 1:
+        repaired = [simplified[0]]
+        for i in range(len(simplified) - 1):
+            if _line_of_sight(grid, simplified[i], simplified[i + 1]):
+                repaired.append(simplified[i + 1])
+            else:
+                # Straight line hits obstacles — restore the original sub-path
+                start_idx = cells.index(simplified[i])
+                end_idx = len(cells) - cells[::-1].index(simplified[i + 1]) - 1
+                repaired.extend(cells[start_idx + 1:end_idx + 1])
+        return repaired
+
     return simplified
 

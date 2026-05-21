@@ -7,6 +7,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(MODEL5_DIR))
 # AirSim / vehicle
 VEHICLE_NAME = "Drone1"
 CRUISE_ALTITUDE_Z = -5.0
+SAFE_ALTITUDE_Z = -28.0  # z axis climb altitude for obstacle clearance (NED: more negative = higher)
 MAX_SPEED = 2.0
 WAYPOINT_REACHED_DIST = 1.0
 CONTROL_DT = 0.1

@@ -95,7 +95,8 @@ class AStarAirSimNavigator:
                 continue
             x = float(pose.position.x_val)
             y = float(pose.position.y_val)
-            if not (math.isfinite(x) and math.isfinite(y)):
+            z = float(pose.position.z_val)
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
                 continue
             if x == 0.0 and y == 0.0:
                 continue
@@ -174,7 +175,7 @@ class AStarAirSimNavigator:
                 "The object-center map is likely over-blocked or the map bounds miss the route."
             )
 
-        cells = simplify_path(cells)
+        cells = simplify_path(cells, grid=grid)
         waypoints = [grid.cell_to_world(cell, z=config.CRUISE_ALTITUDE_Z) for cell in cells]
         waypoints[-1] = goal.astype(np.float32)
         print(f"[Model5] Planned {len(cells)} grid waypoints.")
@@ -191,46 +192,73 @@ class AStarAirSimNavigator:
     def fly_waypoints(self, waypoints):
         import airsim
 
-        print("[Model5] Executing path...")
-        for idx, waypoint in enumerate(waypoints[1:], start=1):
-            start_time = time.time()
-            while True:
-                state = self.get_state()
-                pos = state["position"].astype(np.float32)
-                error = waypoint - pos
-                dist = float(np.linalg.norm(error))
-                if dist <= config.WAYPOINT_REACHED_DIST:
-                    break
-                if time.time() - start_time > config.WAYPOINT_TIMEOUT_SEC:
-                    print(f"\n[Model5] Waypoint {idx} timeout at dist={dist:.2f}m")
-                    break
+        if len(waypoints) < 2:
+            print("[Model5] No waypoints to fly.")
+            return True
 
-                direction = error / max(dist, 1e-6)
-                speed = min(config.MAX_SPEED, dist)
-                vel = direction * speed
-                yaw = self._yaw_from_velocity(vel)
-                self.client.moveByVelocityAsync(
-                    float(vel[0]),
-                    float(vel[1]),
-                    float(vel[2]),
-                    config.CONTROL_DT,
-                    yaw_mode=airsim.YawMode(is_rate=False, yaw_or_rate=math.degrees(yaw)),
-                    vehicle_name=self.vehicle_name,
-                ).join()
+        print("[Model5] Executing path with safe-altitude strategy...")
 
-                collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
-                print(
-                    f"\r[Model5] WP {idx:03d}/{len(waypoints)-1:03d} "
-                    f"pos=({pos[0]:6.1f},{pos[1]:6.1f},{pos[2]:5.1f}) "
-                    f"dist={dist:6.2f}",
-                    end="",
-                    flush=True,
-                )
-                if collision.has_collided:
-                    print("\n[Model5] Collision detected; stopping.")
-                    self.client.moveByVelocityAsync(0.0, 0.0, 0.0, 0.2, vehicle_name=self.vehicle_name).join()
-                    return False
+        # === Phase 1: Climb to safe altitude ===
+        print(f"[Model5] Phase 1: Climbing from z={waypoints[0][2]:.1f} to safe altitude {config.SAFE_ALTITUDE_Z:.1f}")
+        climb_target = np.array([waypoints[0][0], waypoints[0][1], config.SAFE_ALTITUDE_Z], dtype=np.float32)
+        if not self._fly_to_point(climb_target):
+            return False
+
+        # === Phase 2: Fly horizontal waypoints at safe altitude ===
+        for idx in range(1, len(waypoints)):
+            wp_xy = np.array([waypoints[idx][0], waypoints[idx][1], config.SAFE_ALTITUDE_Z], dtype=np.float32)
+            if not self._fly_to_point(wp_xy):
+                return False
+
+        # === Phase 3: Descend to final goal ===
+        goal = waypoints[-1]
+        print(f"[Model5] Phase 3: Descending from z={config.SAFE_ALTITUDE_Z:.1f} to goal z={goal[2]:.1f}")
+        if not self._fly_to_point(goal):
+            return False
+
         print("\n[Model5] Path execution complete.")
+        return True
+
+    def _fly_to_point(self, target):
+        """Fly to a single target point with velocity control. Returns False on collision."""
+        import airsim
+
+        start_time = time.time()
+        while True:
+            state = self.get_state()
+            pos = state["position"].astype(np.float32)
+            error = target - pos
+            dist = float(np.linalg.norm(error))
+            if dist <= config.WAYPOINT_REACHED_DIST:
+                break
+            if time.time() - start_time > config.WAYPOINT_TIMEOUT_SEC:
+                print(f"\n[Model5] Point timeout at dist={dist:.2f}m")
+                break
+
+            direction = error / max(dist, 1e-6)
+            speed = min(config.MAX_SPEED, dist)
+            vel = direction * speed
+            yaw = self._yaw_from_velocity(vel)
+            self.client.moveByVelocityAsync(
+                float(vel[0]),
+                float(vel[1]),
+                float(vel[2]),
+                config.CONTROL_DT,
+                yaw_mode=airsim.YawMode(is_rate=False, yaw_or_rate=math.degrees(yaw)),
+                vehicle_name=self.vehicle_name,
+            ).join()
+
+            collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
+            print(
+                f"\r[Model5] pos=({pos[0]:6.1f},{pos[1]:6.1f},{pos[2]:5.1f}) "
+                f"dist={dist:6.2f}",
+                end="",
+                flush=True,
+            )
+            if collision.has_collided:
+                print("\n[Model5] Collision detected; stopping.")
+                self.client.moveByVelocityAsync(0.0, 0.0, 0.0, 0.2, vehicle_name=self.vehicle_name).join()
+                return False
         return True
 
     def run(self, start=None, goal=None):
