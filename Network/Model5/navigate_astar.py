@@ -196,28 +196,249 @@ class AStarAirSimNavigator:
             print("[Model5] No waypoints to fly.")
             return True
 
-        print("[Model5] Executing path with safe-altitude strategy...")
+        print("[Model5] Executing path with real-time segmentation obstacle detection...")
 
-        # === Phase 1: Climb to safe altitude ===
-        print(f"[Model5] Phase 1: Climbing from z={waypoints[0][2]:.1f} to safe altitude {config.SAFE_ALTITUDE_Z:.1f}")
-        climb_target = np.array([waypoints[0][0], waypoints[0][1], config.SAFE_ALTITUDE_Z], dtype=np.float32)
-        if not self._fly_to_point(climb_target):
-            return False
+        goal = waypoints[-1]
 
-        # === Phase 2: Fly horizontal waypoints at safe altitude ===
         for idx in range(1, len(waypoints)):
-            wp_xy = np.array([waypoints[idx][0], waypoints[idx][1], config.SAFE_ALTITUDE_Z], dtype=np.float32)
-            if not self._fly_to_point(wp_xy):
+            wp_xy = np.array([waypoints[idx][0], waypoints[idx][1], config.CRUISE_ALTITUDE_Z], dtype=np.float32)
+            if not self._fly_to_point_smart(wp_xy, goal):
                 return False
 
-        # === Phase 3: Descend to final goal ===
-        goal = waypoints[-1]
-        print(f"[Model5] Phase 3: Descending from z={config.SAFE_ALTITUDE_Z:.1f} to goal z={goal[2]:.1f}")
+        # Descend to final goal
+        print(f"[Model5] Descending from z={config.CRUISE_ALTITUDE_Z:.1f} to goal z={goal[2]:.1f}")
         if not self._fly_to_point(goal):
             return False
 
         print("\n[Model5] Path execution complete.")
         return True
+
+    def _get_seg_obstacle_ratio(self):
+        """
+        Get the fraction of obstacle pixels in the center region of the forward segmentation camera.
+        Uses grayscale mode (single channel) where pixel value = segmentation object ID.
+        Returns: float in [0, 1], or None on failure.
+        """
+        import airsim
+
+        try:
+            responses = self.client.simGetImages([
+                airsim.ImageRequest("0", airsim.ImageType.Segmentation, True, False)
+            ], vehicle_name=self.vehicle_name)
+            if not responses or not responses[0].image_data_uint8:
+                return None
+
+            img1d = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
+            h, w = responses[0].height, responses[0].width
+            img = img1d.reshape(h, w)
+
+            # Crop center region
+            ch = int(h * config.SEG_CAM_CENTER_CROP)
+            cw = int(w * config.SEG_CAM_CENTER_CROP)
+            y0 = (h - ch) // 2
+            x0 = (w - cw) // 2
+            center = img[y0:y0+ch, x0:x0+cw]
+
+            # In grayscale mode, pixel value = segmentation object ID
+            # Obstacles have seg_id=2 (set by segmentation_rules.py)
+            # Ground/background has seg_id=0
+            # Free objects (sidewalk, street) have seg_id=1
+            obstacle_mask = (center == 2)
+
+            return float(obstacle_mask.mean())
+        except Exception as e:
+            print(f"\n[Model5] Seg camera error: {e}")
+            return None
+
+    def _get_depth_obstacle_ratio(self):
+        """
+        Get the fraction of close-range obstacle pixels in the forward depth camera.
+        Returns: float in [0, 1] representing fraction of pixels closer than DEPTH_CAM_OBSTACLE_DIST,
+                 or None on failure.
+        """
+        import airsim
+
+        try:
+            responses = self.client.simGetImages([
+                airsim.ImageRequest('0', airsim.ImageType.DepthVis, True, False)
+            ], vehicle_name=self.vehicle_name)
+            if not responses or not responses[0].image_data_float:
+                return None
+
+            # image_data_float is already a list of floats when pixels_as_float=True
+            depth1d = np.array(responses[0].image_data_float, dtype=np.float32)
+            h, w = responses[0].height, responses[0].width
+            depth = depth1d.reshape(h, w)
+
+            # Crop center region
+            ch = int(h * config.DEPTH_CAM_CENTER_CROP)
+            cw = int(w * config.DEPTH_CAM_CENTER_CROP)
+            y0 = (h - ch) // 2
+            x0 = (w - cw) // 2
+            center_depth = depth[y0:y0+ch, x0:x0+cw]
+
+            # Filter out invalid depths (0 or inf)
+            valid = (center_depth > 0.1) & (center_depth < 100.0)
+            if not valid.any():
+                return None
+
+            # Fraction of valid pixels that are closer than threshold
+            too_close = (center_depth <= config.DEPTH_CAM_OBSTACLE_DIST) & valid
+            return float(too_close.sum() / valid.sum())
+        except Exception as e:
+            print(f"\n[Model5] Depth camera error: {e}")
+            return None
+
+    def _should_climb(self):
+        """Check if either depth or segmentation camera sees obstacles blocking forward path."""
+        # Depth camera check (primary, measures actual distance)
+        depth_ratio = self._get_depth_obstacle_ratio()
+        if depth_ratio is not None and depth_ratio > 0.05:
+            print(f"\n  [Depth] Close obstacle ratio {depth_ratio:.1%} -> CLIMB")
+            return True
+
+        # Segmentation camera check (backup, detects obstacle type)
+        seg_ratio = self._get_seg_obstacle_ratio()
+        if seg_ratio is not None:
+            should = seg_ratio > config.SEG_CAM_OBSTACLE_THRESHOLD
+            if should:
+                print(f"\n  [Seg] Obstacle ratio {seg_ratio:.1%} > {config.SEG_CAM_OBSTACLE_THRESHOLD:.0%} -> CLIMB")
+            return should
+
+        return False
+
+    def _fly_to_point_smart(self, target_xy, goal):
+        """
+        Fly toward target_xy while using depth+segmentation cameras to detect obstacles.
+        If obstacle detected ahead, STOP horizontal motion and climb to SAFE_ALTITUDE_Z.
+        When close to goal XY, descend to goal altitude.
+        """
+        import airsim
+
+        start_time = time.time()
+        cycle_count = 0
+        climb_triggered = False
+
+        while True:
+            state = self.get_state()
+            pos = state["position"].astype(np.float32)
+            error = target_xy - pos
+            error[2] = 0
+            dist_xy = float(np.linalg.norm(error[:2]))
+
+            if dist_xy <= config.WAYPOINT_REACHED_DIST:
+                break
+            if time.time() - start_time > config.WAYPOINT_TIMEOUT_SEC * 2:
+                print(f"\n[Model5] Point timeout at dist={dist_xy:.2f}m, z={pos[2]:.1f}")
+                break
+
+            cycle_count += 1
+
+            # === Obstacle detection (every N cycles) ===
+            obstacle_detected = False
+            if cycle_count % config.DEPTH_CAM_CHECK_INTERVAL == 0:
+                if pos[2] > config.SAFE_ALTITUDE_Z:  # below safe altitude, check for obstacles
+                    obstacle_detected = self._should_climb()
+                    if obstacle_detected:
+                        print(f"[Model5] Obstacle ahead! Climbing from z={pos[2]:.1f} to {config.SAFE_ALTITUDE_Z:.1f}...")
+                        self._climb_to_safe_altitude()
+                        climb_triggered = True
+                        # Reset timeout after climbing — climb takes time
+                        start_time = time.time()
+                        cycle_count = 0
+                        # Re-check position after climb
+                        state = self.get_state()
+                        pos = state["position"].astype(np.float32)
+                        error = target_xy - pos
+                        error[2] = 0
+                        dist_xy = float(np.linalg.norm(error[:2]))
+                        if dist_xy <= config.WAYPOINT_REACHED_DIST:
+                            break
+
+            # Determine desired altitude
+            dist_to_goal = float(np.linalg.norm(goal[:2] - pos[:2]))
+            if dist_to_goal < 10.0:
+                # Within 10m of goal XY: descend gradually
+                descend_frac = dist_to_goal / 10.0
+                desired_z = config.CRUISE_ALTITUDE_Z + (config.SAFE_ALTITUDE_Z - config.CRUISE_ALTITUDE_Z) * descend_frac
+                desired_z = max(config.CRUISE_ALTITUDE_Z, desired_z)
+            elif climb_triggered and pos[2] > config.SAFE_ALTITUDE_Z:
+                desired_z = config.SAFE_ALTITUDE_Z
+            else:
+                desired_z = pos[2]
+
+            # === Compute velocity ===
+            if obstacle_detected:
+                # Just finished climbing: zero horizontal velocity, only Z adjustment
+                vel = np.array([0.0, 0.0, config.SAFE_ALTITUDE_Z - pos[2]], dtype=np.float32)
+                yaw = 0.0
+            else:
+                # Normal flight: move toward XY target with Z adjustment
+                target_pos = np.array([target_xy[0], target_xy[1], desired_z], dtype=np.float32)
+                vel_error = target_pos - pos
+                vel_dist = float(np.linalg.norm(vel_error))
+                if vel_dist > 1e-6:
+                    direction = vel_error / vel_dist
+                    speed = min(config.MAX_SPEED, vel_dist)
+                    vel = direction * speed
+                else:
+                    vel = np.zeros(3)
+                yaw = self._yaw_from_velocity(vel)
+
+            self.client.moveByVelocityAsync(
+                float(vel[0]),
+                float(vel[1]),
+                float(vel[2]),
+                config.CONTROL_DT,
+                yaw_mode=airsim.YawMode(is_rate=False, yaw_or_rate=math.degrees(yaw)),
+                vehicle_name=self.vehicle_name,
+            ).join()
+
+            collision = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
+            print(
+                f"\r[Model5] pos=({pos[0]:6.1f},{pos[1]:6.1f},{pos[2]:5.1f}) "
+                f"dist={dist_xy:6.2f}",
+                end="",
+                flush=True,
+            )
+            if collision.has_collided:
+                print("\n[Model5] Collision detected; stopping.")
+                self.client.moveByVelocityAsync(0.0, 0.0, 0.0, 0.2, vehicle_name=self.vehicle_name).join()
+                return False
+        return True
+
+    def _climb_to_safe_altitude(self):
+        """
+        Climb directly to SAFE_ALTITUDE_Z using a sustained upward velocity.
+        Uses negative z velocity because AirSim uses NED coordinates (z down).
+        """
+        import airsim
+
+        climb_start = time.time()
+        climb_timeout = 60
+        climb_speed = 3.0  # m/s upward
+
+        while time.time() - climb_start < climb_timeout:
+            state = self.get_state()
+            pos = state["position"].astype(np.float32)
+
+            if pos[2] <= config.SAFE_ALTITUDE_Z:
+                print(f"[Model5] Reached safe altitude z={pos[2]:.1f}")
+                return
+
+            # Fly straight UP (negative z = up in NED)
+            self.client.moveByVelocityAsync(
+                0.0, 0.0, -climb_speed, config.CONTROL_DT,
+                yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=0.0),
+                vehicle_name=self.vehicle_name,
+            ).join()
+
+            # Log progress periodically
+            elapsed = time.time() - climb_start
+            if int(elapsed * 10) % 50 == 0:
+                print(f"  [Climb] z={pos[2]:.1f} -> target {config.SAFE_ALTITUDE_Z:.1f}")
+
+        print(f"[Model5] Climb timeout at z={pos[2]:.1f}")
 
     def _fly_to_point(self, target):
         """Fly to a single target point with velocity control. Returns False on collision."""

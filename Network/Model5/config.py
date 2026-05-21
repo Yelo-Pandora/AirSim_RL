@@ -13,6 +13,16 @@ WAYPOINT_REACHED_DIST = 1.0
 CONTROL_DT = 0.1
 WAYPOINT_TIMEOUT_SEC = 8.0
 
+# Segmentation camera obstacle detection (Method 1: real-time climb)
+SEG_CAM_OBSTACLE_THRESHOLD = 0.15  # fraction of center view that must be obstacle to trigger climb
+SEG_CAM_CHECK_INTERVAL = 10        # check segmentation every N control cycles
+SEG_CAM_CENTER_CROP = 0.4          # analyze center NxN fraction of the image
+
+# Depth camera obstacle detection (backup: measures actual distance)
+DEPTH_CAM_OBSTACLE_DIST = 5.0      # climb if any pixel in center view is closer than this (meters)
+DEPTH_CAM_CHECK_INTERVAL = 5       # check depth every N control cycles (more frequent than seg)
+DEPTH_CAM_CENTER_CROP = 0.5        # analyze center NxN fraction of the depth image
+
 # A* grid.  AirSim uses NED: x/y horizontal, z down.
 MAP_RESOLUTION = 1.0
 MAP_X_MIN = -80.0
