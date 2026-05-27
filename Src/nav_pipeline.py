@@ -211,3 +211,61 @@ class NavPipeline:
             return True, "Destination reached successfully!"
         except Exception as e:
             return False, f"Navigation error: {e}"
+
+    def run_batch_test(self, task_list, status_callback=None):
+        """
+        Run multiple navigation tasks and calculate arrival rate.
+        task_list: list of dicts [{'start': [x,y,z], 'end': [x,y,z]}, ...]
+        """
+        results = []
+        total = len(task_list)
+        arrived_count = 0
+        
+        if status_callback:
+            status_callback(f"Starting batch test for {total} tasks...")
+            
+        for idx, task in enumerate(task_list):
+            start = np.array(task['start'])
+            end = np.array(task['end'])
+            
+            if status_callback:
+                status_callback(f"\n--- Task {idx+1}/{total} ---")
+                status_callback(f"From {start} to {end}")
+            
+            # 1. Plan
+            waypoints, msg = self.plan_path(start, end)
+            if not waypoints:
+                if status_callback:
+                    status_callback(f"Task {idx+1} failed at planning: {msg}")
+                results.append({'task_id': idx+1, 'status': 'planning_failed', 'msg': msg})
+                continue
+            
+            # 2. Navigate
+            success, nav_msg = self.run_navigation(waypoints, status_callback=None) # Keep quiet during batch
+            
+            if success:
+                arrived_count += 1
+                status = 'success'
+            else:
+                status = 'failed'
+                
+            if status_callback:
+                status_callback(f"Task {idx+1} result: {status} ({nav_msg})")
+                
+            results.append({
+                'task_id': idx+1,
+                'start': start.tolist(),
+                'end': end.tolist(),
+                'status': status,
+                'msg': nav_msg
+            })
+            
+        arrival_rate = (arrived_count / total) * 100 if total > 0 else 0
+        summary = {
+            'total': total,
+            'arrived': arrived_count,
+            'arrival_rate': f"{arrival_rate:.2f}%",
+            'details': results
+        }
+        
+        return summary
