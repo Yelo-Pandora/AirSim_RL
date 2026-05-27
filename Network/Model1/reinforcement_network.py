@@ -135,6 +135,10 @@ class AirSimUAVEnv(gym.Env):
         self.goal_xy_hold_radius = 3.0
         self.goal_z_hold_tolerance = 1.0
         self.goal_z_reward_radius = 5.0
+        self.goal_guidance_xy_radius = 5.0
+        self.goal_guidance_z_tolerance = 3.0
+        self.goal_guidance_xy_accel = 1.0
+        self.goal_guidance_z_accel = 0.2
         self.z_hold_kp = 0.85
         self.z_hold_damping = 0.35
         self.lidar_clearance_weight = 1.3
@@ -154,7 +158,7 @@ class AirSimUAVEnv(gym.Env):
         #目的地可视化开关
         self.visualize_goal = False
         # 飞行轨迹可视化开关
-        self.visualize_traj = True
+        self.visualize_traj = False
 
         # 显示用整体上移高度，单位：米
         # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高
@@ -243,6 +247,28 @@ class AirSimUAVEnv(gym.Env):
     @staticmethod
     def _wrap_angle_deg(angle_deg):
         return ((angle_deg + 180.0) % 360.0) - 180.0
+
+    def _compute_goal_guidance_acceleration(self, rel_pos):
+        guidance_accel = np.zeros(3, dtype=np.float32)
+        rel_pos = np.asarray(rel_pos, dtype=np.float32)
+        xy_dist = float(np.linalg.norm(rel_pos[:2]))
+        z_dist = abs(float(rel_pos[2]))
+
+        if (
+            xy_dist > self.goal_guidance_xy_radius
+            or z_dist > self.goal_guidance_z_tolerance
+        ):
+            return guidance_accel
+
+        if xy_dist > 1e-6:
+            guidance_accel[:2] = (
+                rel_pos[:2] / xy_dist * self.goal_guidance_xy_accel
+            )
+        if z_dist > 1e-6:
+            guidance_accel[2] = (
+                np.sign(float(rel_pos[2])) * self.goal_guidance_z_accel
+            )
+        return guidance_accel
 
     def _refine_target_velocity(self, target_vel, rel_pos):
         # 默认保留加速度积分后的目标速度，不额外做近终点速度缩放
@@ -404,6 +430,8 @@ class AirSimUAVEnv(gym.Env):
 
         # 动作先映射为加速度命令，再在一个 RL 控制周期内积分成末端目标速度。
         commanded_accel = action_to_acceleration(action, accel_scale=self.accel_scale)
+        guidance_accel = self._compute_goal_guidance_acceleration(rel_pos_before)
+        commanded_accel = commanded_accel + guidance_accel
         raw_target_vel = integrate_velocity_with_acceleration(
             self.current_velocity,
             commanded_accel,
