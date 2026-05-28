@@ -62,6 +62,7 @@ class WaypointGraphPlanner:
                 "k_neighbors": k_neighbors,
                 "max_edge_distance": max_edge_distance,
                 "path_length": self.path_length(path),
+                "planner": "csv",
             }
 
         raise RuntimeError(

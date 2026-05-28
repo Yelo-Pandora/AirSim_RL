@@ -10,7 +10,29 @@ DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export
 DEFAULT_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "checkpoints", "td3_resume_latest.zip")
 FALLBACK_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "td3_airsim_uav_model.zip")
 
-# Upper planner: graph A* over feasible navigation points.
+# Upper planner: default is online occupancy-grid A* from AirSim scene obstacles.
+UPPER_PLANNER = "occupancy"  # one of: "occupancy", "csv"
+OCCUPANCY_RESOLUTION = 1.0
+OCCUPANCY_BOUNDS_MARGIN = 25.0
+OCCUPANCY_MIN_X = -100.0
+OCCUPANCY_MAX_X = 100.0
+OCCUPANCY_MIN_Y = -130.0
+OCCUPANCY_MAX_Y = 150.0
+OCCUPANCY_OBSTACLE_RADIUS = 2.0
+OCCUPANCY_SAFETY_MARGIN = 1.5
+OCCUPANCY_NEAREST_FREE_RADIUS = 12.0
+OCCUPANCY_ALLOW_DIAGONAL = True
+OCCUPANCY_RADIUS_FALLBACKS = (
+    (2.0, 1.5),
+    (1.5, 1.0),
+    (1.0, 0.6),
+    (0.6, 0.3),
+)
+LOCAL_TARGET_SPACING = 18.0
+LOCAL_TARGET_MIN_SPACING = 8.0
+LOCAL_TARGET_KEEP_TURNS = True
+
+# Fallback planner: graph A* over offline feasible navigation points.
 GRAPH_K_NEIGHBORS = 8
 GRAPH_MAX_EDGE_DISTANCE = 35.0
 GRAPH_MAX_Z_DIFF = 8.0
@@ -26,7 +48,7 @@ GRAPH_FALLBACKS = (
 # Lower TD3 execution.
 SEGMENT_MAX_STEPS = 180
 SEGMENT_GOAL_TOLERANCE = 2.0
-INTERMEDIATE_AXIS_TOLERANCE = 0.8
+INTERMEDIATE_AXIS_TOLERANCE = 3.0
 FINAL_AXIS_TOLERANCE = 1.5
 STOP_ON_SEGMENT_FAILURE = True
 DETERMINISTIC_POLICY = True

@@ -9,19 +9,30 @@ MODEL6_DIR = os.path.dirname(os.path.abspath(__file__))
 if MODEL6_DIR not in sys.path:
     sys.path.insert(0, MODEL6_DIR)
 
-from graph_planner import WaypointGraphPlanner
-from td3_executor import TD3SegmentExecutor
 import config
+if config.PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, config.PROJECT_ROOT)
+
+from graph_planner import WaypointGraphPlanner
+from occupancy_planner import OccupancyAStarPlanner
+from td3_executor import TD3SegmentExecutor
 
 
 def print_plan(plan):
     print(
-        f"[Model6] Upper A*: {len(plan['points'])} local targets, "
-        f"path_length={plan['path_length']:.2f}, "
-        f"k={plan['k_neighbors']}, max_edge={plan['max_edge_distance']:.1f}"
+        f"[Model6] Upper {plan.get('planner', 'csv')} A*: {len(plan['points'])} local targets, "
+        f"path_length={plan['path_length']:.2f}"
     )
     for index, point in enumerate(plan["points"]):
         print(f"  [{index:02d}] {plan['node_ids'][index]} region={plan['regions'][index]} point={point}")
+
+
+def create_airsim_client():
+    import airsim
+
+    client = airsim.MultirotorClient()
+    client.confirmConnection()
+    return client
 
 
 def main():
@@ -29,6 +40,12 @@ def main():
     parser.add_argument("--start", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
     parser.add_argument("--goal", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
     parser.add_argument("--td3-model", type=str, default=None, help="Model1 TD3 checkpoint path")
+    parser.add_argument(
+        "--planner",
+        choices=["occupancy", "csv"],
+        default=config.UPPER_PLANNER,
+        help="Upper planner type. occupancy does not use dataset waypoint candidates.",
+    )
     parser.add_argument("--plan-only", action="store_true", help="Only run upper A* and print local targets")
     parser.add_argument(
         "--validate-waypoints",
@@ -41,15 +58,24 @@ def main():
     goal = np.array(args.goal, dtype=np.float32)
 
     executor = None
-    waypoint_filter = None
-    if args.validate_waypoints or (not args.plan_only and config.VALIDATE_WAYPOINTS_WITH_AIRSIM):
+    safety = None
+    if args.planner == "occupancy" or args.validate_waypoints or (not args.plan_only and config.VALIDATE_WAYPOINTS_WITH_AIRSIM):
         from waypoint_safety import AirSimWaypointSafety
 
-        executor = TD3SegmentExecutor(model_path=args.td3_model)
-        safety = AirSimWaypointSafety(executor.env.client)
-        waypoint_filter = safety.is_safe
+        if args.plan_only:
+            client = create_airsim_client()
+            safety = AirSimWaypointSafety(client)
+        else:
+            executor = TD3SegmentExecutor(model_path=args.td3_model)
+            safety = AirSimWaypointSafety(executor.env.client)
 
-    planner = WaypointGraphPlanner(waypoint_filter=waypoint_filter)
+    if args.planner == "occupancy":
+        if safety is None:
+            raise RuntimeError("Occupancy planner requires AirSim obstacle centers.")
+        planner = OccupancyAStarPlanner(safety.obstacle_centers)
+    else:
+        waypoint_filter = safety.is_safe if safety is not None else None
+        planner = WaypointGraphPlanner(waypoint_filter=waypoint_filter)
     plan = planner.plan(start, goal)
     print_plan(plan)
 
