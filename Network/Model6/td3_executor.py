@@ -73,9 +73,21 @@ class TD3SegmentExecutor:
         self.draw_global_path(points)
 
         for segment_index in range(len(points) - 1):
-            start = np.array(points[segment_index], dtype=np.float32)
             target = np.array(points[segment_index + 1], dtype=np.float32)
             is_final_segment = segment_index == len(points) - 2
+
+            if segment_index == 0:
+                # First segment: start from the planned waypoint
+                start = np.array(points[segment_index], dtype=np.float32)
+            else:
+                # Subsequent segments: use actual drone position, NOT the planned waypoint.
+                # The drone may still be 1-3m away from the waypoint when the intermediate
+                # tolerance is satisfied.  Teleporting to the waypoint would cause an
+                # unrealistic jump and the next segment would start from the wrong place.
+                start = self._get_actual_position()
+                print(f"[Model6] Segment {segment_index} starts from actual pos {start} "
+                      f"(planned waypoint was {points[segment_index]})")
+
             summary = self.execute_segment(segment_index, start, target, is_final_segment=is_final_segment)
             summaries.append(summary)
             if not summary["arrived"] and config.STOP_ON_SEGMENT_FAILURE:
@@ -83,6 +95,18 @@ class TD3SegmentExecutor:
                 break
 
         return summaries
+
+    def _get_actual_position(self):
+        """Read the drone's current position from AirSim."""
+        try:
+            state = self.env.client.getMultirotorState(vehicle_name=self.env.vehicle_name)
+            pos = state.kinematics_estimated.position
+            return np.array([pos.x_val, pos.y_val, pos.z_val], dtype=np.float32)
+        except Exception:
+            # Fallback: use the environment's cached relative position
+            if hasattr(self.env, "current_start_pos"):
+                return self.env.current_start_pos.copy()
+            return np.array([0.0, 0.0, -2.0], dtype=np.float32)
 
     def execute_segment(self, segment_index, start, target, is_final_segment=False):
         print(f"[Model6] Segment {segment_index}: {start} -> {target}")

@@ -27,13 +27,21 @@ class AirSimWaypointSafety:
         xy_distances = np.linalg.norm(deltas, axis=1)
         z_distances = np.abs(self.obstacle_centers[:, 2] - point[2])
 
-        near_mask = (xy_distances <= config.WAYPOINT_OBSTACLE_CLEARANCE) & (
-            z_distances <= max(config.GRAPH_MAX_Z_DIFF, config.WAYPOINT_OBSTACLE_CLEARANCE)
+        # Phase 1: quick center-based rejection (increased clearance)
+        clearance = config.WAYPOINT_OBSTACLE_CLEARANCE
+        near_mask = (xy_distances <= clearance) & (
+            z_distances <= max(config.GRAPH_MAX_Z_DIFF, clearance)
         )
         if np.any(near_mask):
             return False
 
-        return not self._is_surrounded(point, xy_distances, deltas)
+        # Phase 2: surrounded check using obstacle centers
+        if self._is_surrounded(point, xy_distances, deltas):
+            return False
+
+        # Phase 3: ray-cast clearance validation
+        # Cast real collision rays from the waypoint to verify actual free space
+        return self._ray_cast_clearance(point)
 
     def _is_surrounded(self, point, xy_distances, deltas):
         local = deltas[xy_distances <= config.WAYPOINT_SURROUNDED_RADIUS]
@@ -55,6 +63,39 @@ class AirSimWaypointSafety:
                 free_directions += 1
 
         return free_directions < config.WAYPOINT_SURROUNDED_MIN_FREE_DIRECTIONS
+
+    def _ray_cast_clearance(self, point, min_free_dist=None):
+        """
+        Cast real collision-detection rays from the candidate waypoint in N directions.
+        Each ray must travel at least `min_free_dist` meters without hitting anything.
+        This catches cases where a waypoint is 'far from center' but actually inside
+        or right next to a building (center-based checks alone can miss this).
+        """
+        if min_free_dist is None:
+            min_free_dist = config.WAYPOINT_RAY_CLEARANCE_DIST
+
+        import airsim
+
+        num_rays = config.WAYPOINT_SURROUNDED_RAYS
+        for ray_index in range(num_rays):
+            theta = 2.0 * math.pi * ray_index / num_rays
+            # Aim slightly downward to catch walls and ground-level obstacles
+            direction = airsim.Vector3r(
+                math.cos(theta),
+                math.sin(theta),
+                0.0,  # horizontal rays only
+            )
+            try:
+                hit = self.client.simCastRay(
+                    airsim.Vector3r(float(point[0]), float(point[1]), float(point[2])),
+                    direction,
+                )
+                if hit.distance < min_free_dist:
+                    return False
+            except Exception:
+                # If ray cast fails, conservatively reject
+                return False
+        return True
 
     def _collect_obstacle_centers(self):
         centers = []
