@@ -98,7 +98,7 @@ TRAIN_REWARD_WINDOW = 250    # paper-style rolling reward window
 # ============== Paths ==============
 MODEL_SAVE_DIR = "models/saved_models"
 LOG_DIR = "logs"
-DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export.csv")
+DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates.csv")
 TRAIN_METRICS_CSV = os.path.join(LOG_DIR, "rspg_train_metrics.csv")
 EVAL_RESULTS_JSON = os.path.join(LOG_DIR, "rspg_eval_results.json")
 

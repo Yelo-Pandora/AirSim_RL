@@ -97,7 +97,7 @@ class UAVRLOEnv:
         self.sim_obstacles = []
 
     def _load_dataset_points(self):
-        """Load navigation points from dataset/relative_coordinates_export.csv grouped by region."""
+        """Load navigation points from dataset/relative_coordinates.csv grouped by region."""
         csv_path = config.DATASET_CSV
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Navigation dataset not found: {csv_path}")

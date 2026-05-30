@@ -41,7 +41,7 @@ class AirSimUAVEnv(gym.Env):
 
         # 从 CSV 加载目标位置数据，起点默认固定为 [0.0, 0.0, 0.0]
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.positions_file = os.path.join(base_dir, "dataset", "relative_coordinates_export.csv")
+        self.positions_file = os.path.join(base_dir, "dataset", "relative_coordinates.csv")
         self.position_pairs = []
         self.region_points = {}
         self.available_regions = []

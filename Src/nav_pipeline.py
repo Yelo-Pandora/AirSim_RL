@@ -30,12 +30,14 @@ if MODEL6_DIR not in sys.path:
 
 from reinforcement_network import AirSimUAVEnv
 from graph_planner import WaypointGraphPlanner
+from occupancy_planner import OccupancyAStarPlanner
 from td3_executor import TD3SegmentExecutor
 import config as model6_config
 
 class NavPipeline:
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, planner_mode=None):
         self.model_path = model_path
+        self.planner_mode = planner_mode or model6_config.UPPER_PLANNER
         self.executor = None
         self.planner = None
         self.airsim_process = None
@@ -69,25 +71,41 @@ class NavPipeline:
         try:
             # Initialize Model6 executor
             self.executor = TD3SegmentExecutor(model_path=self.model_path)
+
+            safety = None
+            needs_airsim_safety = (
+                self.planner_mode == "occupancy" or
+                model6_config.VALIDATE_WAYPOINTS_WITH_AIRSIM
+            )
+            if needs_airsim_safety:
+                from waypoint_safety import AirSimWaypointSafety
+                safety = AirSimWaypointSafety(self.executor.env.client)
+
+            if self.planner_mode == "occupancy":
+                if safety is None:
+                    return False, "Occupancy planner requires AirSim obstacle centers."
+                self.planner = OccupancyAStarPlanner(safety.obstacle_centers)
+            elif model6_config.VALIDATE_WAYPOINTS_WITH_AIRSIM:
+                self.planner = WaypointGraphPlanner(waypoint_filter=safety.is_safe)
+            else:
+                self.planner = WaypointGraphPlanner()
             
-            # Initialize Model6 planner with safety validation
-            from waypoint_safety import AirSimWaypointSafety
-            safety = AirSimWaypointSafety(self.executor.env.client)
-            self.planner = WaypointGraphPlanner(waypoint_filter=safety.is_safe)
-            
-            return True, "Hierarchical navigation initialized (Model6)."
+            return True, f"Hierarchical navigation initialized (Model6, planner={self.planner_mode})."
         except Exception as e:
             return False, f"Failed to initialize: {e}"
 
     def plan_path(self, start_pos, end_pos):
-        """Run Upper A* Graph Planner (Model6)."""
+        """Run the configured Model6 upper planner."""
         if self.planner is None:
             return None, "Planner not initialized."
             
         try:
             plan = self.planner.plan(start_pos, end_pos)
             waypoints = plan["points"]
-            return waypoints, f"Path planned via graph (Points: {len(waypoints)}, Dist: {plan['path_length']:.1f}m)."
+            return waypoints, (
+                f"Path planned via {plan.get('planner', self.planner_mode)} "
+                f"(Points: {len(waypoints)}, Dist: {plan['path_length']:.1f}m)."
+            )
         except Exception as e:
             return None, f"Planning error: {e}"
 
