@@ -86,8 +86,9 @@ class OccupancyGrid:
 class OccupancyAStarPlanner:
     """Upper planner that derives local target points from an AirSim occupancy grid."""
 
-    def __init__(self, obstacle_centers):
+    def __init__(self, obstacle_centers, client=None):
         self.obstacle_centers = np.asarray(obstacle_centers, dtype=np.float32)
+        self.client = client  # optional AirSim client for reachability validation
 
     def plan(self, start, goal):
         start = np.asarray(start, dtype=np.float32)
@@ -115,6 +116,14 @@ class OccupancyAStarPlanner:
 
             raw_points = self._cells_to_points(grid, cells, start, goal)
             local_targets = self._extract_local_targets(raw_points)
+
+            # Reachability validation: only check suspicious segments where A*
+            # detoured significantly (grid path >> straight line), then cast a
+            # single ray to confirm.
+            if self.client is not None and not self._validate_reachability(raw_points, local_targets, grid):
+                print(f"[Model6] Reachability validation failed; trying next fallback...")
+                continue
+
             return {
                 "points": local_targets,
                 "node_ids": [f"astar_{index}" for index in range(len(local_targets))],
@@ -229,6 +238,87 @@ class OccupancyAStarPlanner:
         else:
             selected.append(raw_points[-1])
         return selected
+
+    def _validate_reachability(self, raw_points, local_targets, grid):
+        """
+        For consecutive waypoints with a significant detour ratio (grid path
+        >> straight line), cast a ray to verify line-of-sight in the real UE5
+        scene.  Catches courtyard traps where the waypoint is inside an enclosed
+        area the drone cannot actually reach.
+        """
+        detour_threshold = 0.6  # Euclidean / grid_path ratio below which we suspect detour
+
+        for i in range(len(local_targets) - 1):
+            wp_from = np.asarray(local_targets[i], dtype=np.float32)
+            wp_to = np.asarray(local_targets[i + 1], dtype=np.float32)
+            euclidean = float(np.linalg.norm(wp_to[:2] - wp_from[:2]))
+            if euclidean < 5.0:
+                continue
+
+            idx_from = self._find_closest_point_index(raw_points, wp_from)
+            idx_to = self._find_closest_point_index(raw_points, wp_to)
+            if idx_from is None or idx_to is None:
+                continue
+
+            lo, hi = min(idx_from, idx_to), max(idx_from, idx_to)
+            if hi - lo < 2:
+                continue
+
+            grid_path_len = self._path_length_2d(raw_points[lo:hi + 1])
+            if grid_path_len < euclidean * 1.05:
+                continue
+
+            ratio = euclidean / grid_path_len
+            if ratio < detour_threshold:
+                if not self._ray_segment_clear(wp_from, wp_to):
+                    print(
+                        f"[Model6]   Segment {i}->{i+1} blocked: "
+                        f"euclidean={euclidean:.1f}m, grid_path={grid_path_len:.1f}m, "
+                        f"ratio={ratio:.2f}"
+                    )
+                    return False
+
+        return True
+
+    def _find_closest_point_index(self, points, target):
+        best_idx = None
+        best_dist = float("inf")
+        for idx, p in enumerate(points):
+            d = float(np.linalg.norm(p[:2] - target[:2]))
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        return best_idx if best_dist < 5.0 else None
+
+    @staticmethod
+    def _path_length_2d(points):
+        total = 0.0
+        for i in range(1, len(points)):
+            total += float(np.linalg.norm(points[i][:2] - points[i - 1][:2]))
+        return total
+
+    def _ray_segment_clear(self, wp_from, wp_to):
+        import airsim
+
+        direction_vec = wp_to - wp_from
+        distance = float(np.linalg.norm(direction_vec[:2]))
+        if distance < 1e-6:
+            return True
+        direction = airsim.Vector3r(
+            float(direction_vec[0] / distance),
+            float(direction_vec[1] / distance),
+            0.0,
+        )
+        try:
+            hit = self.client.simCastRay(
+                airsim.Vector3r(float(wp_from[0]), float(wp_from[1]), float(wp_from[2])),
+                direction,
+            )
+            if hit.distance < distance * 0.9:
+                return False
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def path_length(points):

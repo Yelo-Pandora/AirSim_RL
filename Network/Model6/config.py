@@ -28,8 +28,8 @@ OCCUPANCY_RADIUS_FALLBACKS = (
     (1.0, 0.6),
     (0.6, 0.3),
 )
-LOCAL_TARGET_SPACING = 18.0
-LOCAL_TARGET_MIN_SPACING = 8.0
+LOCAL_TARGET_SPACING = 25.0
+LOCAL_TARGET_MIN_SPACING = 12.0
 LOCAL_TARGET_KEEP_TURNS = True
 
 # Fallback planner: graph A* over offline feasible navigation points.
