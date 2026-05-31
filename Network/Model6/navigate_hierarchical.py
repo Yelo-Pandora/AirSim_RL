@@ -71,8 +71,8 @@ def main():
 
     if args.planner == "occupancy":
         if safety is None:
-            raise RuntimeError("Occupancy planner requires AirSim obstacle centers.")
-        planner = OccupancyAStarPlanner(safety.obstacle_centers, client=safety.client)
+            raise RuntimeError("Occupancy planner requires AirSim connection for ray scanning.")
+        planner = OccupancyAStarPlanner(client=safety.client)
     else:
         waypoint_filter = safety.is_safe if safety is not None else None
         planner = WaypointGraphPlanner(waypoint_filter=waypoint_filter)
