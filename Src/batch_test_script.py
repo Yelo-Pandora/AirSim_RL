@@ -9,6 +9,34 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+DEFAULT_TASK_CSV = os.path.join(REPO_ROOT, "dataset", "relative_coordinates_export.csv")
+UE_ORIGIN_X = 1910.0
+UE_ORIGIN_Y = -458.0
+UE_ORIGIN_Z = 100.0
+
+
+def ue_world_to_airsim_ned(x, y, z):
+    """
+    Convert UE world coordinates into the AirSim local NED frame used by Model1/Model6.
+    This dataset is stored in UE world coordinates (centimeter-scale values).
+    """
+    rel_x = (float(x) - UE_ORIGIN_X) / 100.0
+    rel_y = (float(y) - UE_ORIGIN_Y) / 100.0
+    rel_z = -((float(z) - UE_ORIGIN_Z) / 100.0)
+    return [rel_x, rel_y, rel_z]
+
+
+def normalize_task_point(x, y, z):
+    """
+    Auto-detect task coordinate scale.
+    Large magnitudes are treated as UE world coordinates and converted.
+    Smaller values are assumed to already be AirSim-local.
+    """
+    values = [float(x), float(y), float(z)]
+    if max(abs(v) for v in values) > 500.0:
+        return ue_world_to_airsim_ned(*values), "ue_world"
+    return values, "airsim_local"
+
 def run_batch_from_csv(csv_path):
     """
     Run batch test from a CSV file.
@@ -19,19 +47,32 @@ def run_batch_from_csv(csv_path):
         return
 
     task_list = []
+    source_modes = set()
     with open(csv_path, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
+            start, start_mode = normalize_task_point(row['start_x'], row['start_y'], row['start_z'])
+            end, end_mode = normalize_task_point(row['end_x'], row['end_y'], row['end_z'])
+            source_modes.update([start_mode, end_mode])
             task_list.append({
-                'start': [float(row['start_x']), float(row['start_y']), float(row['start_z'])],
-                'end': [float(row['end_x']), float(row['end_y']), float(row['end_z'])]
+                'start': start,
+                'end': end,
             })
 
     if not task_list:
         print("Error: No tasks found in CSV.")
         return
 
-    pipeline = NavPipeline()
+    if source_modes == {"ue_world"}:
+        print(
+            f"Detected UE-world task coordinates in {csv_path}; "
+            f"converted to AirSim local NED using origin "
+            f"({UE_ORIGIN_X}, {UE_ORIGIN_Y}, {UE_ORIGIN_Z}) and scale /100."
+        )
+    elif "ue_world" in source_modes:
+        print(f"Mixed coordinate modes detected in {csv_path}; converted large-magnitude rows automatically.")
+
+    pipeline = NavPipeline(planner_mode="occupancy")
     
     print("Initializing environment...")
     # pipeline.launch_airsim() # Uncomment if you want the script to launch AirSim
@@ -57,15 +98,4 @@ def run_batch_from_csv(csv_path):
     print("="*30)
 
 if __name__ == "__main__":
-    # Example: Create a dummy CSV for testing if it doesn't exist
-    test_csv = os.path.join(os.path.dirname(__file__), "test_tasks.csv")
-    if not os.path.exists(test_csv):
-        with open(test_csv, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['start_x', 'start_y', 'start_z', 'end_x', 'end_y', 'end_z'])
-            writer.writerow([0, 0, -2, 20, 20, -2])
-            writer.writerow([0, 0, -2, 40, 0, -2])
-            writer.writerow([10, 10, -5, -10, -10, -5])
-        print(f"Created example CSV: {test_csv}")
-
-    run_batch_from_csv(test_csv)
+    run_batch_from_csv(DEFAULT_TASK_CSV)

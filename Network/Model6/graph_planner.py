@@ -22,24 +22,58 @@ class WaypointGraphPlanner:
 
     def _load_dataset_nodes(self):
         nodes = []
+        seen = set()
         with open(self.dataset_csv, encoding="utf-8") as file:
             reader = csv.DictReader(file)
             for index, row in enumerate(reader):
-                point = np.array(
-                    [float(row["x"]), float(row["y"]), float(row["z"])],
-                    dtype=np.float32,
-                )
-                region = str(int(float(row.get("region", 0))))
-                if self.waypoint_filter is not None and not self.waypoint_filter(point):
-                    continue
-                nodes.append({
-                    "id": f"data_{index}",
-                    "point": point,
-                    "region": region,
-                })
+                for suffix, point, region in self._extract_points_from_row(row):
+                    key = tuple(round(float(value), 4) for value in point.tolist())
+                    if key in seen:
+                        continue
+                    if self.waypoint_filter is not None and not self.waypoint_filter(point):
+                        continue
+                    seen.add(key)
+                    nodes.append({
+                        "id": f"data_{index}_{suffix}",
+                        "point": point,
+                        "region": region,
+                    })
         if not nodes:
             raise RuntimeError(f"No waypoint nodes loaded from {self.dataset_csv}")
         return nodes
+
+    def _extract_points_from_row(self, row):
+        """
+        Support both dataset formats:
+        1. Single-point waypoint CSV: x,y,z[,region]
+        2. Task-pair CSV: start_x,start_y,start_z,end_x,end_y,end_z
+        """
+        if {"x", "y", "z"}.issubset(row.keys()):
+            point = np.array(
+                [float(row["x"]), float(row["y"]), float(row["z"])],
+                dtype=np.float32,
+            )
+            region = str(int(float(row.get("region", 0))))
+            return [("point", point, region)]
+
+        if {"start_x", "start_y", "start_z", "end_x", "end_y", "end_z"}.issubset(row.keys()):
+            start = np.array(
+                [float(row["start_x"]), float(row["start_y"]), float(row["start_z"])],
+                dtype=np.float32,
+            )
+            end = np.array(
+                [float(row["end_x"]), float(row["end_y"]), float(row["end_z"])],
+                dtype=np.float32,
+            )
+            return [
+                ("start", start, "pair_start"),
+                ("end", end, "pair_end"),
+            ]
+
+        raise KeyError(
+            "Unsupported CSV columns. Expected x,y,z[,region] or "
+            "start_x,start_y,start_z,end_x,end_y,end_z."
+        )
 
     def plan(self, start, goal):
         start = np.array(start, dtype=np.float32)

@@ -13,7 +13,7 @@
 #         super(UAVNavEnv, self).__init__()
 #         self.bridge = AirSimBridge()
 #         #读取目标点列表（确保路径正确）
-#         self.goal_list = pd.read_csv("uav_env/relative_coordinates_export.csv").values
+#         self.goal_list = pd.read_csv("uav_env/relative_coordinates.csv").values
 #         print(f"Loaded {len(self.goal_list)} goals.")
 
 #         self.observation_space = spaces.Dict({
@@ -168,7 +168,7 @@ class UAVNavEnv(gym.Env):
         super(UAVNavEnv, self).__init__()
         self.bridge = AirSimBridge()
         # 读取目标点列表（确保路径正确）
-        # self.goal_list = pd.read_csv("uav_env/relative_coordinates_export.csv").values
+        # self.goal_list = pd.read_csv("uav_env/relative_coordinates.csv").values
         # print(f"Loaded {len(self.goal_list)} goals.")
 
         self.observation_space = spaces.Dict({

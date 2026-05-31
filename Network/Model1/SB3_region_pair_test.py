@@ -25,7 +25,7 @@ from reinforcement_network import AirSimUAVEnv
 
 
 DEFAULT_MODEL_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "td3_resume_latest")
-DEFAULT_TEST_CSV = os.path.join(REPO_ROOT, "dataset", "relative_coordinates_test.csv")
+DEFAULT_TEST_CSV = os.path.join(REPO_ROOT, "dataset", "relative_coordinates.csv")
 DEFAULT_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "test")
 
 
@@ -51,7 +51,7 @@ def load_region_points(csv_path):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"Test CSV not found: {csv_path}\n"
-            f"Please add relative_coordinates_test.csv first."
+            f"Please add relative_coordinates.csv first."
         )
 
     regions = OrderedDict()
@@ -376,7 +376,7 @@ def evaluate_region_pairs(
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
-        description="Evaluate Model1 TD3 by region pair cases from relative_coordinates_test.csv"
+        description="Evaluate Model1 TD3 by region pair cases from relative_coordinates.csv"
     )
     parser.add_argument(
         "--model-path",
@@ -388,7 +388,7 @@ def build_arg_parser():
         "--csv-path",
         type=str,
         default=DEFAULT_TEST_CSV,
-        help="Path to relative_coordinates_test.csv",
+        help="Path to relative_coordinates.csv",
     )
     parser.add_argument(
         "--output-dir",

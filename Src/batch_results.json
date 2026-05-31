@@ -1,0 +1,607 @@
+{
+    "total": 40,
+    "arrived": 0,
+    "arrival_rate": "0.00%",
+    "details": [
+        {
+            "task_id": 1,
+            "start": [
+                101.4,
+                29.68,
+                -6.6
+            ],
+            "end": [
+                -75.1,
+                -8.22,
+                -16.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/6 reached)."
+        },
+        {
+            "task_id": 2,
+            "start": [
+                -61.1,
+                -101.02,
+                -3.9
+            ],
+            "end": [
+                -10.97211182,
+                -13.19131592,
+                -14.84776611
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/4 reached)."
+        },
+        {
+            "task_id": 3,
+            "start": [
+                119.7,
+                78.28,
+                -7.4
+            ],
+            "end": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 3: collision (3/6 reached)."
+        },
+        {
+            "task_id": 4,
+            "start": [
+                16.0,
+                3.18,
+                -7.2
+            ],
+            "end": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 5: segment_timeout (5/6 reached)."
+        },
+        {
+            "task_id": 5,
+            "start": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "end": [
+                -10.1,
+                -76.12,
+                -9.8
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: segment_timeout (0/8 reached)."
+        },
+        {
+            "task_id": 6,
+            "start": [
+                64.2,
+                3.18,
+                -7.4
+            ],
+            "end": [
+                -60.9,
+                -95.62,
+                -8.8
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/6 reached)."
+        },
+        {
+            "task_id": 7,
+            "start": [
+                108.0,
+                -87.82,
+                -5.4
+            ],
+            "end": [
+                -61.0,
+                -139.82,
+                -11.6
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: segment_timeout (0/6 reached)."
+        },
+        {
+            "task_id": 8,
+            "start": [
+                -73.2,
+                -85.22,
+                -5.6
+            ],
+            "end": [
+                57.9,
+                19.78,
+                -11.3
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 3: collision (3/7 reached)."
+        },
+        {
+            "task_id": 9,
+            "start": [
+                23.5,
+                140.08,
+                -4.0
+            ],
+            "end": [
+                78.0,
+                -153.52,
+                -14.1
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/8 reached)."
+        },
+        {
+            "task_id": 10,
+            "start": [
+                23.5,
+                140.08,
+                -4.0
+            ],
+            "end": [
+                17.8,
+                -86.92,
+                -8.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/6 reached)."
+        },
+        {
+            "task_id": 11,
+            "start": [
+                17.8,
+                -86.92,
+                -8.9
+            ],
+            "end": [
+                -10.5,
+                163.38,
+                -8.94
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/8 reached)."
+        },
+        {
+            "task_id": 12,
+            "start": [
+                -123.9,
+                -90.92,
+                -4.0
+            ],
+            "end": [
+                -117.3,
+                1.48,
+                -9.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/2 reached)."
+        },
+        {
+            "task_id": 13,
+            "start": [
+                -141.4,
+                -191.82,
+                -9.0
+            ],
+            "end": [
+                -125.1,
+                185.28,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/10 reached)."
+        },
+        {
+            "task_id": 14,
+            "start": [
+                103.4,
+                79.58,
+                -9.0
+            ],
+            "end": [
+                -111.5,
+                118.98,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/7 reached)."
+        },
+        {
+            "task_id": 15,
+            "start": [
+                -111.5,
+                118.98,
+                -4.0
+            ],
+            "end": [
+                63.1,
+                4.08,
+                -7.7
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 3: collision (3/7 reached)."
+        },
+        {
+            "task_id": 16,
+            "start": [
+                78.3,
+                -148.32,
+                -9.4
+            ],
+            "end": [
+                101.7,
+                130.78,
+                -5.3
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/7 reached)."
+        },
+        {
+            "task_id": 17,
+            "start": [
+                150.3,
+                37.28,
+                -10.4
+            ],
+            "end": [
+                72.7,
+                -198.02,
+                -13.3
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/8 reached)."
+        },
+        {
+            "task_id": 18,
+            "start": [
+                84.8,
+                -145.42,
+                -4.0
+            ],
+            "end": [
+                -64.4,
+                -146.72,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/4 reached)."
+        },
+        {
+            "task_id": 19,
+            "start": [
+                -94.8,
+                92.08,
+                -4.0
+            ],
+            "end": [
+                118.1,
+                76.88,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 2: collision (2/6 reached)."
+        },
+        {
+            "task_id": 20,
+            "start": [
+                107.0,
+                -82.52,
+                -4.0
+            ],
+            "end": [
+                -63.8,
+                -136.72,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: segment_timeout (0/6 reached)."
+        },
+        {
+            "task_id": 21,
+            "start": [
+                -75.1,
+                -8.22,
+                -16.0
+            ],
+            "end": [
+                101.4,
+                29.68,
+                -6.6
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/7 reached)."
+        },
+        {
+            "task_id": 22,
+            "start": [
+                -10.97211182,
+                -13.19131592,
+                -14.84776611
+            ],
+            "end": [
+                -61.1,
+                -101.02,
+                -3.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: segment_timeout (0/4 reached)."
+        },
+        {
+            "task_id": 23,
+            "start": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "end": [
+                119.7,
+                78.28,
+                -7.4
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/6 reached)."
+        },
+        {
+            "task_id": 24,
+            "start": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "end": [
+                16.0,
+                3.18,
+                -7.2
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/5 reached)."
+        },
+        {
+            "task_id": 25,
+            "start": [
+                -10.1,
+                -76.12,
+                -9.8
+            ],
+            "end": [
+                -106.2,
+                125.18,
+                -4.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/9 reached)."
+        },
+        {
+            "task_id": 26,
+            "start": [
+                -60.9,
+                -95.62,
+                -8.8
+            ],
+            "end": [
+                64.2,
+                3.18,
+                -7.4
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 2: collision (2/5 reached)."
+        },
+        {
+            "task_id": 27,
+            "start": [
+                -61.0,
+                -139.82,
+                -11.6
+            ],
+            "end": [
+                108.0,
+                -87.82,
+                -5.4
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/5 reached)."
+        },
+        {
+            "task_id": 28,
+            "start": [
+                57.9,
+                19.78,
+                -11.3
+            ],
+            "end": [
+                -73.2,
+                -85.22,
+                -5.6
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/8 reached)."
+        },
+        {
+            "task_id": 29,
+            "start": [
+                78.0,
+                -153.52,
+                -14.1
+            ],
+            "end": [
+                23.5,
+                140.08,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/9 reached)."
+        },
+        {
+            "task_id": 30,
+            "start": [
+                17.8,
+                -86.92,
+                -8.9
+            ],
+            "end": [
+                23.5,
+                140.08,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/7 reached)."
+        },
+        {
+            "task_id": 31,
+            "start": [
+                -10.5,
+                163.38,
+                -8.94
+            ],
+            "end": [
+                17.8,
+                -86.92,
+                -8.9
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/8 reached)."
+        },
+        {
+            "task_id": 32,
+            "start": [
+                -117.3,
+                1.48,
+                -9.0
+            ],
+            "end": [
+                -123.9,
+                -90.92,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/3 reached)."
+        },
+        {
+            "task_id": 33,
+            "start": [
+                -125.1,
+                185.28,
+                -4.0
+            ],
+            "end": [
+                -141.4,
+                -191.82,
+                -9.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: segment_timeout (0/10 reached)."
+        },
+        {
+            "task_id": 34,
+            "start": [
+                -111.5,
+                118.98,
+                -4.0
+            ],
+            "end": [
+                103.4,
+                79.58,
+                -9.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/6 reached)."
+        },
+        {
+            "task_id": 35,
+            "start": [
+                63.1,
+                4.08,
+                -7.7
+            ],
+            "end": [
+                -111.5,
+                118.98,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 2: collision (2/8 reached)."
+        },
+        {
+            "task_id": 36,
+            "start": [
+                101.7,
+                130.78,
+                -5.3
+            ],
+            "end": [
+                78.3,
+                -148.32,
+                -9.4
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/8 reached)."
+        },
+        {
+            "task_id": 37,
+            "start": [
+                72.7,
+                -198.02,
+                -13.3
+            ],
+            "end": [
+                150.3,
+                37.28,
+                -10.4
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/7 reached)."
+        },
+        {
+            "task_id": 38,
+            "start": [
+                -64.4,
+                -146.72,
+                -4.0
+            ],
+            "end": [
+                84.8,
+                -145.42,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/4 reached)."
+        },
+        {
+            "task_id": 39,
+            "start": [
+                118.1,
+                76.88,
+                -4.0
+            ],
+            "end": [
+                -94.8,
+                92.08,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 1: collision (1/6 reached)."
+        },
+        {
+            "task_id": 40,
+            "start": [
+                -63.8,
+                -136.72,
+                -4.0
+            ],
+            "end": [
+                107.0,
+                -82.52,
+                -4.0
+            ],
+            "status": "failed",
+            "msg": "Failed at segment 0: collision (0/5 reached)."
+        }
+    ]
+}

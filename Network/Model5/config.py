@@ -41,7 +41,7 @@ NEAREST_FREE_SEARCH_RADIUS = 12.0
 ALLOW_DIAGONAL = True
 
 # Dataset endpoints used by Model3/Model4 style experiments.
-DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export.csv")
+DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates.csv")
 
 # Segmentation convention inherited from Model2:
 # 0 unknown/background, 1 traversable road-like surface, 2 obstacle.
