@@ -6,6 +6,11 @@ import numpy as np
 import config
 
 
+def _matches_any(name, patterns):
+    lower = name.lower()
+    return any(pattern in lower for pattern in patterns)
+
+
 class OccupancyGrid:
     def __init__(self, x_min, x_max, y_min, y_max, resolution):
         self.x_min = float(x_min)
@@ -56,6 +61,24 @@ class OccupancyGrid:
             for dx in range(-radius_cells, radius_cells + 1):
                 if dx * dx + dy * dy <= radius_cells * radius_cells:
                     self.set_occupied((center[0] + dx, center[1] + dy), False)
+
+    def mark_bbox(self, center_xy, half_size_xy, margin=0.0):
+        """Mark a rectangular bounding box as occupied.
+
+        Args:
+            center_xy: (x, y) center of the obstacle
+            half_size_xy: (hx, hy) half-extent of the obstacle
+            margin: additional safety margin to add around the obstacle
+        """
+        cx, cy = center_xy
+        hx, hy = half_size_xy
+        hxm, hym = hx + margin, hy + margin
+        # Compute cell bounds
+        c_min_x = self.world_to_cell((cx - hxm, cy - hym))
+        c_max_x = self.world_to_cell((cx + hxm, cy + hym))
+        for cell_x in range(min(c_min_x[0], c_max_x[0]), max(c_min_x[0], c_max_x[0]) + 1):
+            for cell_y in range(min(c_min_x[1], c_max_x[1]), max(c_min_x[1], c_max_x[1]) + 1):
+                self.set_occupied((cell_x, cell_y), True)
 
     def is_line_clear(self, point_a, point_b):
         """Return True if the straight line from point_a to point_b (xy)
@@ -124,10 +147,20 @@ class OccupancyGrid:
 
 
 class OccupancyAStarPlanner:
-    """Upper planner that derives local target points from an AirSim occupancy grid."""
+    """Upper planner that derives local target points from an AirSim occupancy grid.
+
+    Obstacles are detected by casting vertical rays top-down for each grid
+    cell, using AirSim's simTestLineOfSightBetweenPoints. If the line from a
+    point high above the scene to a point just above the ground is blocked,
+    that cell is marked occupied.
+
+    A* runs on the inflated working copy while LOS checks use the intact base
+    grid so that start/goal clear-disc never hides buildings from the
+    visibility test.
+    """
 
     def __init__(self, client):
-        self.client = client  # required for ray-scanned occupancy grid
+        self.client = client
 
     def plan(self, start, goal):
         start = np.asarray(start, dtype=np.float32)
@@ -136,15 +169,19 @@ class OccupancyAStarPlanner:
         last_cells = None
 
         if self.client is None:
-            raise RuntimeError("Ray-scanned occupancy grid requires an AirSim client.")
+            raise RuntimeError("Occupancy grid requires an AirSim client.")
 
-        # Build the base grid once using top-down ray scanning for precise obstacle
-        # geometry, then apply varying safety margin inflations as fallbacks.
-        base_grid = self._build_grid_from_rays(bounds, start, goal)
+        base_grid = self._build_grid_from_objects(bounds)
         if base_grid is None:
-            raise RuntimeError("Failed to build ray-scanned occupancy grid.")
+            raise RuntimeError("Failed to build occupancy grid from scene objects.")
+        if config.OCCUPANCY_REQUIRE_NONEMPTY_MAP and int(base_grid.occupied.sum()) == 0:
+            raise RuntimeError("Occupancy grid is empty; raycast/building detection failed.")
 
-        _, max_safety = config.OCCUPANCY_RADIUS_FALLBACKS[0]
+        print(
+            f"[Model6] Occupancy base_grid={base_grid.width}x{base_grid.height}, "
+            f"occupied={base_grid.occupied.sum()} cells ({base_grid.occupied_ratio():.1%})"
+        )
+
         for _, safety_margin in config.OCCUPANCY_RADIUS_FALLBACKS:
             # A* needs start/goal free; work on a copy so base_grid stays intact for LOS.
             grid = self._inflate_grid(base_grid, safety_margin)
@@ -166,8 +203,15 @@ class OccupancyAStarPlanner:
                 continue
 
             raw_points = self._cells_to_points(grid, cells, start, goal)
-            # Use base_grid (intact buildings, no clear_disc) for LOS checks.
-            local_targets = self._extract_local_targets(base_grid, raw_points)
+            # Use base_grid (intact buildings, no clear_disc) for all LOS / occupied checks.
+            try:
+                local_targets = self._extract_local_targets(base_grid, raw_points)
+            except RuntimeError as exc:
+                print(f"[Model6] Reject occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                continue
+            if len(local_targets) < 2:
+                print(f"[Model6] Reject occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
+                continue
             return {
                 "points": local_targets,
                 "node_ids": [f"astar_{index}" for index in range(len(local_targets))],
@@ -182,58 +226,197 @@ class OccupancyAStarPlanner:
         raise RuntimeError(f"Occupancy A* failed. Last cells={last_cells}")
 
     def _bounds(self, start, goal):
+        start = np.asarray(start, dtype=np.float32)
+        goal = np.asarray(goal, dtype=np.float32)
+        min_x = min(float(start[0]), float(goal[0])) - config.OCCUPANCY_BOUNDS_MARGIN
+        max_x = max(float(start[0]), float(goal[0])) + config.OCCUPANCY_BOUNDS_MARGIN
+        min_y = min(float(start[1]), float(goal[1])) - config.OCCUPANCY_BOUNDS_MARGIN
+        max_y = max(float(start[1]), float(goal[1])) + config.OCCUPANCY_BOUNDS_MARGIN
+
+        span_x = max_x - min_x
+        span_y = max_y - min_y
+        min_span = float(config.OCCUPANCY_MIN_PLAN_SPAN)
+        if span_x < min_span:
+            pad = 0.5 * (min_span - span_x)
+            min_x -= pad
+            max_x += pad
+        if span_y < min_span:
+            pad = 0.5 * (min_span - span_y)
+            min_y -= pad
+            max_y += pad
+
         return (
-            config.OCCUPANCY_MIN_X,
-            config.OCCUPANCY_MAX_X,
-            config.OCCUPANCY_MIN_Y,
-            config.OCCUPANCY_MAX_Y,
+            max(config.OCCUPANCY_MIN_X, min_x),
+            min(config.OCCUPANCY_MAX_X, max_x),
+            max(config.OCCUPANCY_MIN_Y, min_y),
+            min(config.OCCUPANCY_MAX_Y, max_y),
         )
 
-    def _build_grid_from_rays(self, bounds, start, goal):
-        """
-        Build a precise occupancy grid by casting vertical rays from high above
-        down through every cell.  Any cell where a ray hits an obstacle before
-        reaching the ground is marked occupied.
+    def _build_grid_from_objects(self, bounds):
+        """Build the occupancy grid by vertical top-down LOS checks.
 
-        This captures the true 2D footprint of all buildings — L-shapes,
-        U-shapes, courtyards, thin walls — without relying on disk approximations.
-        """
-        import time
-        import airsim
+        NED coordinates: more negative z means higher altitude. We treat the
+        world as approximately planar and cast one vertical line segment per
+        grid cell from high above to just above the ground plane.
 
+        If the raycast path produces an empty map in the current AirSim build
+        or scene, fall back to rasterising scene objects by pose + scale so we
+        never continue planning on an all-free grid.
+        """
+        x_min, x_max, y_min, y_max = bounds
+        grid = OccupancyGrid(x_min, x_max, y_min, y_max, config.OCCUPANCY_RESOLUTION)
+        top_z = config.OCCUPANCY_GROUND_Z - config.OCCUPANCY_RAY_ABOVE_GROUND
+        bottom_z = config.OCCUPANCY_GROUND_Z - config.OCCUPANCY_GROUND_CLEARANCE
+
+        print(
+            f"[Model6] Building occupancy grid: {grid.width}x{grid.height}, "
+            f"x=[{grid.x_min:.1f}, {grid.x_max:.1f}], y=[{grid.y_min:.1f}, {grid.y_max:.1f}], "
+            f"ray_z=[{top_z:.1f} -> {bottom_z:.1f}]"
+        )
+
+        count = 0
+        for cell_y in range(grid.height):
+            if cell_y % max(int(config.OCCUPANCY_RAY_PROGRESS_ROWS), 1) == 0 or cell_y == grid.height - 1:
+                print(f"[Model6] Occupancy raycast progress: row {cell_y + 1}/{grid.height}")
+            for cell_x in range(grid.width):
+                world_x = grid.x_min + cell_x * grid.resolution
+                world_y = grid.y_min + cell_y * grid.resolution
+                if self._vertical_path_blocked(world_x, world_y, top_z, bottom_z):
+                    grid.set_occupied((cell_x, cell_y), True)
+                    count += 1
+
+        print(
+            f"[Model6] Raycast occupancy: {count} cells occupied "
+            f"({grid.occupied_ratio():.1%})"
+        )
+
+        if count == 0:
+            print("[Model6] Raycast occupancy is empty, fallback to scene-object occupancy.")
+            fallback_grid = self._build_grid_from_scene_objects(bounds)
+            if int(fallback_grid.occupied.sum()) > 0:
+                return fallback_grid
+
+        return grid
+
+    def _build_grid_from_scene_objects(self, bounds):
+        """Fallback occupancy builder using scene object pose + scale."""
         x_min, x_max, y_min, y_max = bounds
         grid = OccupancyGrid(x_min, x_max, y_min, y_max, config.OCCUPANCY_RESOLUTION)
 
-        ray_origin_z = max(x_max - x_min, y_max - y_min) * 2.0  # high enough to clear all buildings
-        ground_z = max(float(start[2]), float(goal[2]), 0.0) + 20.0  # below this is "free space"
+        obstacle_names = self._collect_obstacle_names()
+        if not obstacle_names:
+            print("[Model6] WARNING: No scene obstacles detected for fallback occupancy.")
+            return grid
 
-        total_cells = grid.width * grid.height
         marked = 0
-        t0 = time.time()
+        skipped = 0
+        for name in obstacle_names:
+            try:
+                pose = self.client.simGetObjectPose(name)
+                scale = self.client.simGetObjectScale(name)
+            except Exception:
+                skipped += 1
+                continue
 
-        for cy in range(grid.height):
-            world_y = grid.y_min + cy * grid.resolution
-            for cx in range(grid.width):
-                world_x = grid.x_min + cx * grid.resolution
-                origin = airsim.Vector3r(float(world_x), float(world_y), float(ray_origin_z))
-                direction = airsim.Vector3r(0.0, 0.0, 1.0)  # straight down (positive z = down in NED)
+            px = float(pose.position.x_val)
+            py = float(pose.position.y_val)
+            pz = float(pose.position.z_val)
+            if not all(math.isfinite(v) for v in (px, py, pz)):
+                skipped += 1
+                continue
+            if px == 0.0 and py == 0.0 and pz == 0.0:
+                skipped += 1
+                continue
 
-                try:
-                    hit = self.client.simCastRay(origin, direction)
-                    if hit.distance > 0 and hit.distance < (ground_z - ray_origin_z):
-                        grid.set_occupied((cx, cy), True)
-                        marked += 1
-                except Exception:
-                    pass
+            sx = abs(float(scale.x_val))
+            sy = abs(float(scale.y_val))
+            half_x = max(sx / 2.0, 0.5)
+            half_y = max(sy / 2.0, 0.5)
+            grid.mark_bbox((px, py), (half_x, half_y), margin=config.OCCUPANCY_OBSTACLE_RADIUS)
+            marked += 1
 
-            if (cy + 1) % 20 == 0 or cy == grid.height - 1:
-                elapsed = time.time() - t0
-                pct = (cy + 1) / grid.height * 100
-                print(f"\r[Model6] Ray-scanning: {pct:.1f}% ({cy+1}/{grid.height}), marked={marked}", end="", flush=True)
-
-        print(f"\n[Model6] Ray-scanning done in {time.time()-t0:.1f}s: {marked}/{total_cells} occupied ({grid.occupied_ratio():.1%})")
-
+        print(
+            f"[Model6] Fallback object occupancy: {marked} obstacles marked, "
+            f"{skipped} skipped, {grid.occupied.sum()} cells ({grid.occupied_ratio():.1%})"
+        )
         return grid
+
+    def _vertical_path_blocked(self, x, y, top_z, bottom_z):
+        """Return True when a vertical LOS from sky to near-ground is blocked."""
+        import airsim
+
+        start = airsim.Vector3r(float(x), float(y), float(top_z))
+        end = airsim.Vector3r(float(x), float(y), float(bottom_z))
+        try:
+            has_los = self.client.simTestLineOfSightBetweenPoints(start, end)
+        except Exception:
+            return True
+        return not bool(has_los)
+
+    def _raycast_cell(self, x, y, ground_z):
+        """Find highest obstruction z at (x, y) using LOS binary search.
+
+        Returns the z of the highest blocking point, or None if the path
+        from high above to ground is completely clear.
+
+        NED: lower z = higher altitude. Binary search finds the transition
+        between clear (high) and blocked (low) z values.
+        """
+        import airsim
+
+        hi_z = ground_z - config.OCCUPANCY_RAY_ABOVE_GROUND  # high above (more negative)
+        lo_z = ground_z  # at ground (more positive)
+
+        highest_clear = hi_z
+        lowest_blocked = None
+
+        for _ in range(20):
+            if abs(lo_z - hi_z) < 0.5:
+                break
+            mid_z = (hi_z + lo_z) / 2.0
+            try:
+                pt = airsim.Vector3r(x, y, mid_z)
+                has_los = self.client.simTestLineOfSightToPoint(pt)
+            except Exception:
+                has_los = False
+
+            if has_los:
+                # Clear to mid_z → obstruction is below
+                highest_clear = mid_z
+                hi_z = mid_z
+            else:
+                # Blocked at mid_z → obstruction at or above
+                lowest_blocked = mid_z
+                lo_z = mid_z
+
+        if lowest_blocked is None:
+            return None
+        return highest_clear
+
+    def _collect_obstacle_names(self):
+        """Reuse the same pattern matching logic as waypoint_safety."""
+        names = set()
+        for pattern in config.OBSTACLE_OBJECT_PATTERNS:
+            try:
+                names.update(self.client.simListSceneObjects(f".*{pattern}.*"))
+            except Exception:
+                continue
+
+        try:
+            all_names = self.client.simListSceneObjects(".*")
+        except Exception:
+            return sorted(names)
+
+        for name in all_names:
+            try:
+                if int(self.client.simGetSegmentationObjectID(name)) == int(config.OBSTACLE_SEGMENTATION_ID):
+                    names.add(name)
+                    continue
+            except Exception:
+                pass
+            if _matches_any(name, config.OBSTACLE_OBJECT_PATTERNS):
+                names.add(name)
+        return sorted(names)
 
     def _inflate_grid(self, base_grid, safety_margin):
         """Copy the base grid and dilate occupied cells by safety_margin."""
@@ -264,8 +447,10 @@ class OccupancyAStarPlanner:
             grid.resolution,
         )
         working.occupied[:] = grid.occupied
-        working.clear_disc(start[:2], config.OCCUPANCY_NEAREST_FREE_RADIUS)
-        working.clear_disc(goal[:2], config.OCCUPANCY_NEAREST_FREE_RADIUS)
+        clear_radius = float(config.OCCUPANCY_START_GOAL_CLEAR_RADIUS)
+        if clear_radius > 0.0:
+            working.clear_disc(start[:2], clear_radius)
+            working.clear_disc(goal[:2], clear_radius)
         return working
 
     def _astar(self, grid, start, goal):
@@ -325,59 +510,129 @@ class OccupancyAStarPlanner:
         points[-1] = goal
         return points
 
-    @staticmethod
-    def _find_free_waypoint(grid, last_selected, raw_points, current_index):
-        """Walk backwards from current_index to find the furthest point that
-        has clear LOS to last_selected. Returns index or None.
-        """
-        for i in range(current_index - 1, 0, -1):
-            if grid.is_line_clear(last_selected, raw_points[i]):
-                return i
-        return None
-
     def _extract_local_targets(self, grid, raw_points):
         """Extract sparse local targets from the dense A* path.
 
-        Keeps turning points and maintains a minimum spacing, but ensures
-        that the straight-line segment between any two consecutive targets
-        does NOT cross occupied cells (LOS check).
+        Walks the dense path and selects points that are at least
+        LOCAL_TARGET_SPACING apart while maintaining clear LOS.  Turning
+        points (direction changes beyond LOCAL_TARGET_MIN_SPACING) are
+        preserved to guide the TD3 controller around obstacles.
+
+        When LOS between last_selected and the furthest candidate is blocked,
+        the furthest free point with clear LOS from last_selected is inserted
+        as an intermediate waypoint.
+
+        Every candidate point is verified free (not inside an obstacle).
+        The goal is also checked and moved to the nearest free cell if needed.
         """
         if len(raw_points) <= 2:
             return raw_points
+
         selected = [raw_points[0]]
         last_selected = raw_points[0]
         previous_direction = None
 
         for index in range(1, len(raw_points) - 1):
             current = raw_points[index]
+
+            # Skip occupied cells
+            cell = grid.world_to_cell(current)
+            if not grid.is_free(cell):
+                previous_direction = None
+                continue
+
             next_point = raw_points[index + 1]
             direction = np.sign(next_point[:2] - current[:2]).astype(np.int32)
             dist_from_last = float(np.linalg.norm(current - last_selected))
-            is_turn = previous_direction is not None and not np.array_equal(direction, previous_direction)
-            should_keep_turn = config.LOCAL_TARGET_KEEP_TURNS and is_turn and dist_from_last >= config.LOCAL_TARGET_MIN_SPACING
+            is_turn = (
+                previous_direction is not None
+                and not np.array_equal(direction, previous_direction)
+            )
+            should_keep_turn = (
+                config.LOCAL_TARGET_KEEP_TURNS
+                and is_turn
+                and dist_from_last >= config.LOCAL_TARGET_MIN_SPACING
+            )
             should_keep_spacing = dist_from_last >= config.LOCAL_TARGET_SPACING
 
             if should_keep_turn or should_keep_spacing:
                 if grid.is_line_clear(last_selected, current):
-                    # Straight line is clear — keep per original rules.
                     selected.append(current)
                     last_selected = current
                 else:
-                    # LOS blocked: walk backwards from current to find the
-                    # furthest free point and insert it as an intermediate target.
-                    backtrack = self._find_free_waypoint(grid, last_selected, raw_points, index)
-                    if backtrack is not None:
-                        selected.append(raw_points[backtrack])
-                        last_selected = raw_points[backtrack]
-                    selected.append(current)
-                    last_selected = current
+                    # LOS blocked: insert the furthest free point with clear LOS.
+                    backtrack_found = False
+                    for k in range(index - 1, 0, -1):
+                        bt = raw_points[k]
+                        bt_cell = grid.world_to_cell(bt)
+                        if grid.is_free(bt_cell) and grid.is_line_clear(last_selected, bt):
+                            selected.append(bt)
+                            last_selected = bt
+                            backtrack_found = True
+                            break
+                    # Only append current if it's free AND reachable from last_selected.
+                    cur_cell = grid.world_to_cell(current)
+                    if grid.is_free(cur_cell) and grid.is_line_clear(last_selected, current):
+                        selected.append(current)
+                        last_selected = current
+                    elif not backtrack_found:
+                        # No viable backtrack and current is unreachable — just
+                        # keep current as last_selected so the loop can retry
+                        # from here with a different candidate.
+                        pass
+                    previous_direction = None
 
             previous_direction = direction
 
-        if float(np.linalg.norm(raw_points[-1] - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
-            selected[-1] = raw_points[-1]
+        # Handle goal: check if inside an obstacle
+        goal_point = raw_points[-1]
+        goal_cell = grid.world_to_cell(goal_point)
+        if not grid.is_free(goal_cell):
+            free_goal_cell = grid.nearest_free(goal_cell, config.OCCUPANCY_NEAREST_FREE_RADIUS)
+            if free_goal_cell is not None:
+                goal_world = grid.cell_to_world(free_goal_cell, float(goal_point[2]))
+                print(
+                    f"[Model6] WARNING: Goal is inside an obstacle! "
+                    f"Moved to nearest free cell: {goal_world}"
+                )
+                if len(selected) > 1:
+                    selected[-1] = goal_world
+                else:
+                    selected.append(goal_world)
+            else:
+                # No free cell found within search radius — try a larger one
+                # before giving up.  If still nothing, append goal anyway and
+                # let the lower-level executor / safety layer handle it.
+                free_goal_cell = grid.nearest_free(goal_cell, config.OCCUPANCY_NEAREST_FREE_RADIUS * 2)
+                if free_goal_cell is not None:
+                    goal_world = grid.cell_to_world(free_goal_cell, float(goal_point[2]))
+                    print(
+                        f"[Model6] WARNING: Goal is inside an obstacle! "
+                        f"Moved to nearest free cell (extended search): {goal_world}"
+                    )
+                    if len(selected) > 1:
+                        selected[-1] = goal_world
+                    else:
+                        selected.append(goal_world)
+                else:
+                    print(
+                        f"[Model6] WARNING: Goal is inside an obstacle and no free "
+                        f"cell found within {config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m. "
+                        f"Appending goal anyway — executor will handle it."
+                    )
+                    raise RuntimeError(
+                        f"Goal remains inside an obstacle and no free cell was found within "
+                        f"{config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m."
+                    )
+        elif not grid.is_line_clear(selected[-1], goal_point):
+            raise RuntimeError(
+                f"Final direct segment to goal is blocked from {selected[-1]} to {goal_point}."
+            )
+        elif float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
+            selected[-1] = goal_point
         else:
-            selected.append(raw_points[-1])
+            selected.append(goal_point)
+
         return selected
 
     @staticmethod

@@ -66,10 +66,14 @@ class AirSimWaypointSafety:
 
     def _ray_cast_clearance(self, point, min_free_dist=None):
         """
-        Cast real collision-detection rays from the candidate waypoint in N directions.
-        Each ray must travel at least `min_free_dist` meters without hitting anything.
-        This catches cases where a waypoint is 'far from center' but actually inside
-        or right next to a building (center-based checks alone can miss this).
+        Use AirSim's simTestLineOfSightBetweenPoints to verify free space
+        around the candidate waypoint in 8 directions.
+
+        We test from the waypoint to a point at min_free_dist in each direction.
+        If ANY direction is blocked, the waypoint is unsafe.
+
+        This replaces the old simCastRay approach (which was not available in
+        the AirSim Python API and silently swallowed by the except clause).
         """
         if min_free_dist is None:
             min_free_dist = config.WAYPOINT_RAY_CLEARANCE_DIST
@@ -77,23 +81,21 @@ class AirSimWaypointSafety:
         import airsim
 
         num_rays = config.WAYPOINT_SURROUNDED_RAYS
+        px, py, pz = float(point[0]), float(point[1]), float(point[2])
+
         for ray_index in range(num_rays):
             theta = 2.0 * math.pi * ray_index / num_rays
-            # Aim slightly downward to catch walls and ground-level obstacles
-            direction = airsim.Vector3r(
-                math.cos(theta),
-                math.sin(theta),
-                0.0,  # horizontal rays only
+            test_point = airsim.GeoPoint(
+                latitude=px + math.cos(theta) * min_free_dist,
+                longitude=py + math.sin(theta) * min_free_dist,
+                altitude=pz,
             )
             try:
-                hit = self.client.simCastRay(
-                    airsim.Vector3r(float(point[0]), float(point[1]), float(point[2])),
-                    direction,
-                )
-                if hit.distance < min_free_dist:
+                has_los = self.client.simTestLineOfSightToPoint(test_point)
+                if not has_los:
                     return False
             except Exception:
-                # If ray cast fails, conservatively reject
+                # If the API call fails, conservatively reject
                 return False
         return True
 
@@ -126,22 +128,18 @@ class AirSimWaypointSafety:
             except Exception:
                 continue
 
-        if names:
-            return sorted(names)
-
         try:
             all_names = self.client.simListSceneObjects(".*")
         except Exception:
-            return []
+            return sorted(names)
 
-        blocked = []
         for name in all_names:
-            if _matches_any(name, config.OBSTACLE_OBJECT_PATTERNS):
-                blocked.append(name)
-                continue
             try:
-                if int(self.client.simGetSegmentationObjectID(name)) == 2:
-                    blocked.append(name)
+                if int(self.client.simGetSegmentationObjectID(name)) == int(config.OBSTACLE_SEGMENTATION_ID):
+                    names.add(name)
+                    continue
             except Exception:
-                continue
-        return sorted(blocked)
+                pass
+            if _matches_any(name, config.OBSTACLE_OBJECT_PATTERNS):
+                names.add(name)
+        return sorted(names)

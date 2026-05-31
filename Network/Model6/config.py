@@ -10,10 +10,18 @@ DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export
 DEFAULT_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "checkpoints", "td3_resume_latest.zip")
 FALLBACK_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "td3_airsim_uav_model.zip")
 
+# Raycast-based occupancy detection (top-down).
+# NED coordinates: z more negative = higher, z more positive = lower.
+OCCUPANCY_GROUND_Z = 0.0           # flat AirSim world ground z in NED coordinates
+OCCUPANCY_RAY_ABOVE_GROUND = 60.0  # vertical ray starts this many meters above ground
+OCCUPANCY_GROUND_CLEARANCE = 1.0   # ray ends this many meters above ground, avoiding ground collision
+OCCUPANCY_RAY_PROGRESS_ROWS = 20   # print progress every N grid rows while building occupancy
+
 # Upper planner: default is online occupancy-grid A* from AirSim scene obstacles.
 UPPER_PLANNER = "occupancy"  # one of: "occupancy", "csv"
 OCCUPANCY_RESOLUTION = 1.0
-OCCUPANCY_BOUNDS_MARGIN = 25.0
+OCCUPANCY_BOUNDS_MARGIN = 60.0
+OCCUPANCY_MIN_PLAN_SPAN = 140.0
 OCCUPANCY_MIN_X = -140.0
 OCCUPANCY_MAX_X = 170.0
 OCCUPANCY_MIN_Y = -200.0
@@ -21,6 +29,9 @@ OCCUPANCY_MAX_Y = 190.0
 OCCUPANCY_OBSTACLE_RADIUS = 2.0
 OCCUPANCY_SAFETY_MARGIN = 1.5
 OCCUPANCY_NEAREST_FREE_RADIUS = 12.0
+OCCUPANCY_START_GOAL_CLEAR_RADIUS = 0.0
+OCCUPANCY_REQUIRE_NONEMPTY_MAP = True
+OCCUPANCY_FALLBACK_LARGE_OBJECT_MIN_SIDE = 6.0
 OCCUPANCY_ALLOW_DIAGONAL = True
 OCCUPANCY_RADIUS_FALLBACKS = (
     (2.0, 1.5),
@@ -28,8 +39,8 @@ OCCUPANCY_RADIUS_FALLBACKS = (
     (1.0, 0.6),
     (0.6, 0.3),
 )
-LOCAL_TARGET_SPACING = 25.0
-LOCAL_TARGET_MIN_SPACING = 12.0
+LOCAL_TARGET_SPACING = 40
+LOCAL_TARGET_MIN_SPACING = 20
 LOCAL_TARGET_KEEP_TURNS = True
 
 # Fallback planner: graph A* over offline feasible navigation points.
@@ -55,6 +66,7 @@ DETERMINISTIC_POLICY = True
 
 # AirSim waypoint safety validation for upper graph nodes.
 VALIDATE_WAYPOINTS_WITH_AIRSIM = False
+OBSTACLE_SEGMENTATION_ID = 2
 WAYPOINT_OBSTACLE_CLEARANCE = 3.0
 WAYPOINT_SURROUNDED_RADIUS = 8.0
 WAYPOINT_SURROUNDED_MIN_FREE_DIRECTIONS = 3
@@ -62,6 +74,10 @@ WAYPOINT_SURROUNDED_RAYS = 8
 WAYPOINT_RAY_CLEARANCE_DIST = 4.0  # simCastRay must find >= this distance in all 8 directions
 OBSTACLE_OBJECT_PATTERNS = (
     "building",
+    "wall",
+    "house",
+    "roof",
+    "block",
     "ad_column",
     "adstand",
     "ad_stand",

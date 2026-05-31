@@ -59,20 +59,30 @@ def main():
 
     executor = None
     safety = None
+    client = None
+
+    # Occupancy planner needs a raw AirSim client (pose + scale of scene objects).
+    # CSV planner's waypoint validation uses AirSimWaypointSafety.
     if args.planner == "occupancy" or args.validate_waypoints or (not args.plan_only and config.VALIDATE_WAYPOINTS_WITH_AIRSIM):
         from waypoint_safety import AirSimWaypointSafety
 
         if args.plan_only:
             client = create_airsim_client()
-            safety = AirSimWaypointSafety(client)
+            if args.planner == "occupancy":
+                # Occupancy planner only needs the raw client, no safety wrapping.
+                pass
+            else:
+                safety = AirSimWaypointSafety(client)
         else:
             executor = TD3SegmentExecutor(model_path=args.td3_model)
-            safety = AirSimWaypointSafety(executor.env.client)
+            client = executor.env.client
+            if args.planner != "occupancy":
+                safety = AirSimWaypointSafety(client)
 
     if args.planner == "occupancy":
-        if safety is None:
-            raise RuntimeError("Occupancy planner requires AirSim connection for ray scanning.")
-        planner = OccupancyAStarPlanner(client=safety.client)
+        if client is None:
+            raise RuntimeError("Occupancy planner requires an AirSim connection.")
+        planner = OccupancyAStarPlanner(client=client)
     else:
         waypoint_filter = safety.is_safe if safety is not None else None
         planner = WaypointGraphPlanner(waypoint_filter=waypoint_filter)
