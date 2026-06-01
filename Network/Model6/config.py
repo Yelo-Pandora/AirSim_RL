@@ -19,6 +19,16 @@ OCCUPANCY_RAY_PROGRESS_ROWS = 20   # print progress every N grid rows while buil
 
 # Upper planner: default is online occupancy-grid A* from AirSim scene obstacles.
 UPPER_PLANNER = "occupancy"  # one of: "occupancy", "csv"
+OCCUPANCY_USE_OBJECT_BOUNDS = True
+OCCUPANCY_USE_LOS_FALLBACK = False
+OCCUPANCY_INCLUDE_SEGMENTATION_OBSTACLES = False
+OCCUPANCY_USE_TOPDOWN_MAP = True
+OCCUPANCY_TOPDOWN_PREINFLATED = True
+OCCUPANCY_TOPDOWN_METADATA = os.path.join(
+    MODEL6_DIR,
+    "topdown_depth",
+    "topdown_depth_20260601_165808_occupancy_h10_infl2.json",
+)
 OCCUPANCY_RESOLUTION = 1.0
 OCCUPANCY_BOUNDS_MARGIN = 60.0
 OCCUPANCY_MIN_PLAN_SPAN = 140.0
@@ -115,3 +125,9 @@ OBSTACLE_OBJECT_PATTERNS = (
 # Visualization.
 VISUALIZE_GLOBAL_PATH = True
 VISUAL_Z_OFFSET = 20.0
+
+# Top-down depth-map capture.  Keep this at the exact center of the configured
+# occupancy bounds so expanded captures/crops stay symmetric around Model6's
+# planning map.
+TOPDOWN_CAMERA_CENTER_X = 15.0
+TOPDOWN_CAMERA_CENTER_Y = -5.0

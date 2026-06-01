@@ -1,0 +1,30 @@
+{
+  "image": "E:\\AirSim_RL\\Network\\Model6\\topdown_depth\\first5_relative_coordinates_astar_overlay.png",
+  "summary": [
+    {
+      "case": 1,
+      "num_targets": 9,
+      "bad_targets": []
+    },
+    {
+      "case": 2,
+      "num_targets": 8,
+      "bad_targets": []
+    },
+    {
+      "case": 3,
+      "num_targets": 11,
+      "bad_targets": []
+    },
+    {
+      "case": 4,
+      "num_targets": 14,
+      "bad_targets": []
+    },
+    {
+      "case": 5,
+      "num_targets": 15,
+      "bad_targets": []
+    }
+  ]
+}

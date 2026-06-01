@@ -1,5 +1,7 @@
 import heapq
+import json
 import math
+import os
 
 import numpy as np
 
@@ -146,13 +148,134 @@ class OccupancyGrid:
         return float(self.occupied.sum()) / float(self.width * self.height)
 
 
+class TopDownOccupancyGrid(OccupancyGrid):
+    """Occupancy grid loaded from a top-down map.
+
+    The saved map uses image cells, with the AirSim local NED origin anchored
+    at the vehicle spawn pixel.  For the current top-down camera orientation,
+    increasing rows move toward local -x and increasing columns move toward
+    local +y.
+    """
+
+    def __init__(self, metadata, occupied):
+        coverage = metadata["coverage"]
+        meters_per_pixel = metadata["meters_per_pixel"]
+        self.resolution_x = float(meters_per_pixel["x"])
+        self.resolution_y = float(meters_per_pixel["y"])
+        if abs(self.resolution_x - self.resolution_y) > 1e-6:
+            raise RuntimeError(
+                "Top-down occupancy map requires square pixels; got "
+                f"x={self.resolution_x}, y={self.resolution_y}"
+            )
+        self.resolution = self.resolution_x
+        self.occupied = np.asarray(occupied, dtype=bool)
+        self.height, self.width = self.occupied.shape
+        frame = metadata.get("coordinate_frame", {})
+        if frame.get("origin") == "vehicle_spawn":
+            origin = frame["origin_pixel"]
+            self.origin_row = float(origin["row"])
+            self.origin_col = float(origin["col"])
+        else:
+            # Legacy metadata was written before the image row direction was
+            # corrected.  Infer the spawn origin from the local coverage bounds.
+            self.origin_row = float(coverage["x_max"]) / self.resolution_x
+            self.origin_col = -float(coverage["y_min"]) / self.resolution_y
+        self.x_max = self.origin_row * self.resolution_x
+        self.x_min = self.x_max - (self.height - 1) * self.resolution_x
+        self.y_min = -self.origin_col * self.resolution_y
+        self.y_max = self.y_min + (self.width - 1) * self.resolution_y
+
+    def to_metadata(self):
+        return {
+            "coverage": {
+                "x_min": self.x_min,
+                "x_max": self.x_max,
+                "y_min": self.y_min,
+                "y_max": self.y_max,
+            },
+            "meters_per_pixel": {
+                "x": self.resolution_x,
+                "y": self.resolution_y,
+            },
+            "coordinate_frame": {
+                "origin": "vehicle_spawn",
+                "origin_pixel": {
+                    "row": self.origin_row,
+                    "col": self.origin_col,
+                },
+            },
+        }
+
+    def world_to_cell(self, point):
+        return (
+            int(round(self.origin_row - float(point[0]) / self.resolution_x)),
+            int(round(self.origin_col + float(point[1]) / self.resolution_y)),
+        )
+
+    def cell_to_world(self, cell, z):
+        return np.array(
+            [
+                (self.origin_row - cell[0]) * self.resolution_x,
+                (cell[1] - self.origin_col) * self.resolution_y,
+                z,
+            ],
+            dtype=np.float32,
+        )
+
+    def in_bounds(self, cell):
+        return 0 <= cell[0] < self.height and 0 <= cell[1] < self.width
+
+    def is_free(self, cell):
+        if not self.in_bounds(cell):
+            return False
+        return not bool(self.occupied[cell[0], cell[1]])
+
+    def set_occupied(self, cell, occupied=True):
+        if self.in_bounds(cell):
+            self.occupied[cell[0], cell[1]] = occupied
+
+    def is_line_clear(self, point_a, point_b):
+        cell_a = self.world_to_cell(point_a)
+        cell_b = self.world_to_cell(point_b)
+
+        if not self.in_bounds(cell_a) or not self.in_bounds(cell_b):
+            return False
+        if cell_a == cell_b:
+            return True
+
+        row0, col0 = cell_a
+        row1, col1 = cell_b
+        d_row = abs(row1 - row0)
+        d_col = abs(col1 - col0)
+        step_row = 1 if row0 < row1 else -1
+        step_col = 1 if col0 < col1 else -1
+        err = d_row - d_col
+
+        while True:
+            if self.occupied[row0, col0]:
+                return False
+            if row0 == row1 and col0 == col1:
+                break
+            e2 = 2 * err
+            if e2 > -d_col:
+                err -= d_col
+                row0 += step_row
+            if e2 < d_row:
+                err += d_row
+                col0 += step_col
+            if not self.in_bounds((row0, col0)):
+                return False
+        return True
+
+    def occupied_ratio(self):
+        return float(self.occupied.sum()) / float(self.height * self.width)
+
+
 class OccupancyAStarPlanner:
     """Upper planner that derives local target points from an AirSim occupancy grid.
 
-    Obstacles are detected by casting vertical rays top-down for each grid
-    cell, using AirSim's simTestLineOfSightBetweenPoints. If the line from a
-    point high above the scene to a point just above the ground is blocked,
-    that cell is marked occupied.
+    The runtime path loads a prebuilt top-down occupancy map. Older LOS and
+    scene-object pose/scale builders remain as fallbacks only.
 
     A* runs on the inflated working copy while LOS checks use the intact base
     grid so that start/goal clear-disc never hides buildings from the
@@ -169,7 +292,8 @@ class OccupancyAStarPlanner:
         last_cells = None
 
         if self.client is None:
-            raise RuntimeError("Occupancy grid requires an AirSim client.")
+            if not config.OCCUPANCY_USE_TOPDOWN_MAP:
+                raise RuntimeError("Occupancy grid requires an AirSim client.")
 
         base_grid = self._build_grid_from_objects(bounds)
         if base_grid is None:
@@ -188,8 +312,12 @@ class OccupancyAStarPlanner:
             grid = self._clear_start_goal(grid, start, goal)
             raw_start = grid.world_to_cell(start)
             raw_goal = grid.world_to_cell(goal)
-            start_cell = grid.nearest_free(raw_start, config.OCCUPANCY_NEAREST_FREE_RADIUS)
-            goal_cell = grid.nearest_free(raw_goal, config.OCCUPANCY_NEAREST_FREE_RADIUS)
+            start_cell, goal_cell = self._nearest_reachable_endpoint_cells(
+                grid,
+                raw_start,
+                raw_goal,
+                config.OCCUPANCY_NEAREST_FREE_RADIUS,
+            )
             last_cells = (start_cell, goal_cell)
             print(
                 f"[Model6] Occupancy A*: grid={grid.width}x{grid.height}, "
@@ -202,7 +330,13 @@ class OccupancyAStarPlanner:
             if cells is None:
                 continue
 
-            raw_points = self._cells_to_points(grid, cells, start, goal)
+            raw_points = self._cells_to_points(
+                grid,
+                cells,
+                start,
+                goal,
+                keep_original_endpoints=False,
+            )
             # Use base_grid (intact buildings, no clear_disc) for all LOS / occupied checks.
             try:
                 local_targets = self._extract_local_targets(base_grid, raw_points)
@@ -253,16 +387,47 @@ class OccupancyAStarPlanner:
         )
 
     def _build_grid_from_objects(self, bounds):
-        """Build the occupancy grid by vertical top-down LOS checks.
+        """Build the occupancy grid from scene-object bounds.
 
-        NED coordinates: more negative z means higher altitude. We treat the
-        world as approximately planar and cast one vertical line segment per
-        grid cell from high above to just above the ground plane.
-
-        If the raycast path produces an empty map in the current AirSim build
-        or scene, fall back to rasterising scene objects by pose + scale so we
-        never continue planning on an all-free grid.
+        The old top-down LOS path is kept only as an optional fallback because
+        LOS can ignore building collision in the current scene.
         """
+        if config.OCCUPANCY_USE_TOPDOWN_MAP:
+            topdown_grid = self._build_grid_from_topdown_map()
+            if int(topdown_grid.occupied.sum()) > 0:
+                return topdown_grid
+            print("[Model6] Top-down occupancy map is empty.")
+
+        if config.OCCUPANCY_USE_OBJECT_BOUNDS:
+            object_grid = self._build_grid_from_scene_objects(bounds)
+            if int(object_grid.occupied.sum()) > 0:
+                return object_grid
+            print("[Model6] Object-bound occupancy is empty.")
+            if not config.OCCUPANCY_USE_LOS_FALLBACK:
+                return object_grid
+
+        return self._build_grid_from_los(bounds)
+
+    def _build_grid_from_topdown_map(self):
+        metadata_path = config.OCCUPANCY_TOPDOWN_METADATA
+        with open(metadata_path, encoding="utf-8") as file:
+            metadata = json.load(file)
+
+        occupancy_path = metadata["files"]["occupancy_npy"]
+        if not os.path.isabs(occupancy_path):
+            occupancy_path = os.path.join(config.PROJECT_ROOT, occupancy_path)
+        occupied = np.load(occupancy_path)
+        grid = TopDownOccupancyGrid(metadata, occupied)
+        print(
+            f"[Model6] Top-down occupancy: {grid.height}x{grid.width}, "
+            f"x=[{grid.x_min:.1f}, {grid.x_max:.1f}], "
+            f"y=[{grid.y_min:.1f}, {grid.y_max:.1f}], "
+            f"occupied={grid.occupied.sum()} cells ({grid.occupied_ratio():.1%})"
+        )
+        return grid
+
+    def _build_grid_from_los(self, bounds):
+        """Build the occupancy grid by vertical top-down LOS checks."""
         x_min, x_max, y_min, y_max = bounds
         grid = OccupancyGrid(x_min, x_max, y_min, y_max, config.OCCUPANCY_RESOLUTION)
         top_z = config.OCCUPANCY_GROUND_Z - config.OCCUPANCY_RAY_ABOVE_GROUND
@@ -299,7 +464,7 @@ class OccupancyAStarPlanner:
         return grid
 
     def _build_grid_from_scene_objects(self, bounds):
-        """Fallback occupancy builder using scene object pose + scale."""
+        """Fallback occupancy builder using scene-object pose + scale."""
         x_min, x_max, y_min, y_max = bounds
         grid = OccupancyGrid(x_min, x_max, y_min, y_max, config.OCCUPANCY_RESOLUTION)
 
@@ -311,35 +476,46 @@ class OccupancyAStarPlanner:
         marked = 0
         skipped = 0
         for name in obstacle_names:
-            try:
-                pose = self.client.simGetObjectPose(name)
-                scale = self.client.simGetObjectScale(name)
-            except Exception:
+            obstacle_bounds = self._object_bounds_xy_from_pose_scale(name)
+            if obstacle_bounds is None:
                 skipped += 1
                 continue
 
-            px = float(pose.position.x_val)
-            py = float(pose.position.y_val)
-            pz = float(pose.position.z_val)
-            if not all(math.isfinite(v) for v in (px, py, pz)):
-                skipped += 1
-                continue
-            if px == 0.0 and py == 0.0 and pz == 0.0:
-                skipped += 1
-                continue
-
-            sx = abs(float(scale.x_val))
-            sy = abs(float(scale.y_val))
-            half_x = max(sx / 2.0, 0.5)
-            half_y = max(sy / 2.0, 0.5)
-            grid.mark_bbox((px, py), (half_x, half_y), margin=config.OCCUPANCY_OBSTACLE_RADIUS)
+            center_xy, half_size_xy = obstacle_bounds
+            grid.mark_bbox(
+                center_xy,
+                half_size_xy,
+                margin=config.OCCUPANCY_OBSTACLE_RADIUS,
+            )
             marked += 1
 
         print(
-            f"[Model6] Fallback object occupancy: {marked} obstacles marked, "
-            f"{skipped} skipped, {grid.occupied.sum()} cells ({grid.occupied_ratio():.1%})"
+            f"[Model6] Object occupancy: {marked} pose/scale obstacles marked, "
+            f"{skipped} skipped, {grid.occupied.sum()} cells "
+            f"({grid.occupied_ratio():.1%})"
         )
         return grid
+
+    def _object_bounds_xy_from_pose_scale(self, name):
+        try:
+            pose = self.client.simGetObjectPose(name)
+            scale = self.client.simGetObjectScale(name)
+        except Exception:
+            return None
+
+        px = float(pose.position.x_val)
+        py = float(pose.position.y_val)
+        pz = float(pose.position.z_val)
+        if not all(math.isfinite(v) for v in (px, py, pz)):
+            return None
+        if px == 0.0 and py == 0.0 and pz == 0.0:
+            return None
+
+        sx = abs(float(scale.x_val))
+        sy = abs(float(scale.y_val))
+        center_xy = (px, py)
+        half_size_xy = (max(sx / 2.0, 0.5), max(sy / 2.0, 0.5))
+        return center_xy, half_size_xy
 
     def _vertical_path_blocked(self, x, y, top_z, bottom_z):
         """Return True when a vertical LOS from sky to near-ground is blocked."""
@@ -394,13 +570,16 @@ class OccupancyAStarPlanner:
         return highest_clear
 
     def _collect_obstacle_names(self):
-        """Reuse the same pattern matching logic as waypoint_safety."""
+        """Collect obstacle actors by name, with optional segmentation lookup."""
         names = set()
         for pattern in config.OBSTACLE_OBJECT_PATTERNS:
             try:
                 names.update(self.client.simListSceneObjects(f".*{pattern}.*"))
             except Exception:
                 continue
+
+        if not config.OCCUPANCY_INCLUDE_SEGMENTATION_OBSTACLES:
+            return sorted(names)
 
         try:
             all_names = self.client.simListSceneObjects(".*")
@@ -420,20 +599,25 @@ class OccupancyAStarPlanner:
 
     def _inflate_grid(self, base_grid, safety_margin):
         """Copy the base grid and dilate occupied cells by safety_margin."""
-        inflated = OccupancyGrid(
-            base_grid.x_min, base_grid.x_max,
-            base_grid.y_min, base_grid.y_max,
-            base_grid.resolution,
-        )
-        inflated.occupied[:] = base_grid.occupied
+        if isinstance(base_grid, TopDownOccupancyGrid):
+            inflated = TopDownOccupancyGrid(base_grid.to_metadata(), base_grid.occupied.copy())
+            if config.OCCUPANCY_TOPDOWN_PREINFLATED:
+                return inflated
+        else:
+            inflated = OccupancyGrid(
+                base_grid.x_min, base_grid.x_max,
+                base_grid.y_min, base_grid.y_max,
+                base_grid.resolution,
+            )
+            inflated.occupied[:] = base_grid.occupied
 
         radius_cells = int(math.ceil(float(safety_margin) / base_grid.resolution))
-        ys, xs = np.where(base_grid.occupied)
-        for x, y in zip(xs, ys):
-            for dy in range(-radius_cells, radius_cells + 1):
-                for dx in range(-radius_cells, radius_cells + 1):
-                    if dx * dx + dy * dy <= radius_cells * radius_cells:
-                        inflated.set_occupied((x + dx, y + dy), True)
+        rows, cols = np.where(base_grid.occupied)
+        for row, col in zip(rows, cols):
+            for d_row in range(-radius_cells, radius_cells + 1):
+                for d_col in range(-radius_cells, radius_cells + 1):
+                    if d_row * d_row + d_col * d_col <= radius_cells * radius_cells:
+                        inflated.set_occupied((row + d_row, col + d_col), True)
 
         return inflated
 
@@ -441,17 +625,97 @@ class OccupancyAStarPlanner:
         """Return a copy of *grid* with discs cleared around start and goal
         for A* pathfinding.  Leaves the original grid untouched.
         """
-        working = OccupancyGrid(
-            grid.x_min, grid.x_max,
-            grid.y_min, grid.y_max,
-            grid.resolution,
-        )
-        working.occupied[:] = grid.occupied
+        if isinstance(grid, TopDownOccupancyGrid):
+            working = TopDownOccupancyGrid(grid.to_metadata(), grid.occupied.copy())
+        else:
+            working = OccupancyGrid(
+                grid.x_min, grid.x_max,
+                grid.y_min, grid.y_max,
+                grid.resolution,
+            )
+            working.occupied[:] = grid.occupied
         clear_radius = float(config.OCCUPANCY_START_GOAL_CLEAR_RADIUS)
         if clear_radius > 0.0:
             working.clear_disc(start[:2], clear_radius)
             working.clear_disc(goal[:2], clear_radius)
         return working
+
+    def _nearest_reachable_endpoint_cells(self, grid, raw_start, raw_goal, radius):
+        start_cell = grid.nearest_free(raw_start, radius)
+        goal_cell = grid.nearest_free(raw_goal, radius)
+        if start_cell is not None and goal_cell is not None:
+            if self._astar(grid, start_cell, goal_cell) is not None:
+                return start_cell, goal_cell
+
+        max_radius = max(int(math.ceil(radius * 3.0)), int(math.ceil(radius + 24.0)))
+        start_candidates = self._free_candidates_by_component(grid, raw_start, max_radius)
+        goal_candidates = self._free_candidates_by_component(grid, raw_goal, max_radius)
+        if not start_candidates or not goal_candidates:
+            return start_cell, goal_cell
+
+        goal_by_component = {}
+        for distance, cell, component in goal_candidates:
+            goal_by_component.setdefault(component, []).append((distance, cell))
+
+        best = None
+        for start_distance, start_candidate, component in start_candidates:
+            if component not in goal_by_component:
+                continue
+            goal_distance, goal_candidate = goal_by_component[component][0]
+            score = start_distance + goal_distance
+            if best is None or score < best[0]:
+                best = (score, start_candidate, goal_candidate)
+
+        if best is None:
+            return start_cell, goal_cell
+
+        print(
+            "[Model6] Endpoint nearest-free cells are disconnected; "
+            f"using reachable cells start={best[1]}, goal={best[2]}, "
+            f"search_radius={max_radius}."
+        )
+        return best[1], best[2]
+
+    def _free_candidates_by_component(self, grid, center, radius):
+        components = self._free_components(grid)
+        center_row, center_col = center
+        radius = int(math.ceil(radius))
+        row_min = max(0, center_row - radius)
+        row_max = min(grid.height - 1, center_row + radius)
+        col_min = max(0, center_col - radius)
+        col_max = min(grid.width - 1, center_col + radius)
+        candidates = []
+        for row in range(row_min, row_max + 1):
+            for col in range(col_min, col_max + 1):
+                component = int(components[row, col])
+                if component < 0:
+                    continue
+                distance = math.hypot(row - center_row, col - center_col)
+                if distance <= radius:
+                    candidates.append((distance, (row, col), component))
+        candidates.sort(key=lambda item: item[0])
+        return candidates
+
+    def _free_components(self, grid):
+        components = np.full(grid.occupied.shape, -1, dtype=np.int32)
+        component_id = 0
+        for row in range(grid.height):
+            for col in range(grid.width):
+                if grid.occupied[row, col] or components[row, col] >= 0:
+                    continue
+                stack = [(row, col)]
+                components[row, col] = component_id
+                while stack:
+                    cur_row, cur_col = stack.pop()
+                    for next_row, next_col in self._neighbors((cur_row, cur_col)):
+                        if not grid.in_bounds((next_row, next_col)):
+                            continue
+                        if grid.occupied[next_row, next_col] or components[next_row, next_col] >= 0:
+                            continue
+                        components[next_row, next_col] = component_id
+                        stack.append((next_row, next_col))
+                component_id += 1
+        return components
 
     def _astar(self, grid, start, goal):
         if not grid.is_free(start) or not grid.is_free(goal):
@@ -498,7 +762,7 @@ class OccupancyAStarPlanner:
         cells.reverse()
         return cells
 
-    def _cells_to_points(self, grid, cells, start, goal):
+    def _cells_to_points(self, grid, cells, start, goal, keep_original_endpoints=True):
         total_xy = max(float(np.linalg.norm(goal[:2] - start[:2])), 1e-6)
         points = []
         for cell in cells:
@@ -506,8 +770,9 @@ class OccupancyAStarPlanner:
             progress = float(np.linalg.norm(xy[:2] - start[:2])) / total_xy
             z = float(start[2] + np.clip(progress, 0.0, 1.0) * (goal[2] - start[2]))
             points.append(np.array([xy[0], xy[1], z], dtype=np.float32))
-        points[0] = start
-        points[-1] = goal
+        if keep_original_endpoints:
+            points[0] = start
+            points[-1] = goal
         return points
 
     def _extract_local_targets(self, grid, raw_points):
@@ -625,15 +890,53 @@ class OccupancyAStarPlanner:
                         f"{config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m."
                     )
         elif not grid.is_line_clear(selected[-1], goal_point):
-            raise RuntimeError(
-                f"Final direct segment to goal is blocked from {selected[-1]} to {goal_point}."
-            )
+            self._append_blocked_tail(grid, selected, raw_points)
         elif float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
             selected[-1] = goal_point
         else:
             selected.append(goal_point)
 
         return selected
+
+    def _append_blocked_tail(self, grid, selected, raw_points):
+        goal_point = raw_points[-1]
+        guard = 0
+        while not grid.is_line_clear(selected[-1], goal_point):
+            guard += 1
+            if guard > len(raw_points):
+                raise RuntimeError(
+                    f"Final direct segment to goal is blocked from {selected[-1]} "
+                    f"to {goal_point}."
+                )
+
+            bridge = None
+            last_cell = grid.world_to_cell(selected[-1])
+            for index in range(len(raw_points) - 2, 0, -1):
+                candidate = raw_points[index]
+                candidate_cell = grid.world_to_cell(candidate)
+                if candidate_cell == last_cell:
+                    break
+                if grid.is_free(candidate_cell) and grid.is_line_clear(selected[-1], candidate):
+                    bridge = candidate
+                    break
+
+            if bridge is None:
+                raise RuntimeError(
+                    f"Final direct segment to goal is blocked from {selected[-1]} "
+                    f"to {goal_point}, and no clear bridge point was found."
+                )
+
+            if float(np.linalg.norm(bridge - selected[-1])) < 1e-3:
+                raise RuntimeError(
+                    f"Final direct segment to goal is blocked from {selected[-1]} "
+                    f"to {goal_point}, and bridge search stalled."
+                )
+            selected.append(bridge)
+
+        if float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
+            selected[-1] = goal_point
+        else:
+            selected.append(goal_point)
 
     @staticmethod
     def path_length(points):

@@ -8,7 +8,7 @@ lower action controller.
 
 1. Upper decision network: occupancy-grid A*.
    - Input: global start and global goal coordinates.
-   - Map source: AirSim scene obstacle objects inferred from segmentation/name rules.
+   - Map source: prebuilt top-down occupancy map in `topdown_depth/`.
    - Output: an automatically generated local target sequence from the A* path.
 
 2. Lower action network: Model1 TD3.
@@ -59,3 +59,6 @@ removed before A* builds the upper graph.
 The default occupancy planner does not depend on those candidate CSV points.  It
 builds a 2D AirSim occupancy grid, runs A*, then extracts local targets from
 turning points and spacing along the grid path.
+
+Offline occupancy-map construction and review scripts live in
+`occupancy_tools/`. They are not called by the runtime navigation pipeline.

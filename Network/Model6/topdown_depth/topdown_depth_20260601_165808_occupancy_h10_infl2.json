@@ -1,0 +1,67 @@
+{
+  "source_metadata": "Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_metadata.json",
+  "source_height_npy": "E:\\AirSim_RL\\Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_height.npy",
+  "height_threshold": 10.0,
+  "inflate_meters": 2.0,
+  "inflate_cells": 2,
+  "width": 390,
+  "height": 350,
+  "occupied_pixels_raw": 56098,
+  "occupied_pixels_inflated": 72869,
+  "total_pixels": 136500,
+  "raw_occupied_ratio": 0.41097435897435897,
+  "inflated_occupied_ratio": 0.5338388278388279,
+  "coverage": {
+    "x_min": -180.0,
+    "x_max": 170.0,
+    "y_min": -200.0,
+    "y_max": 190.0,
+    "world_x_npy_order": "bottom_to_top",
+    "world_y_npy_order": "left_to_right"
+  },
+  "meters_per_pixel": {
+    "x": 1.0000000000000002,
+    "y": 1.0,
+    "target": 1.0
+  },
+  "pixel_axes": {
+    "row": "-airsim_local_x",
+    "col": "+airsim_local_y"
+  },
+  "model_bounds_pixels": {
+    "x_min_y_min": [
+      310,
+      0
+    ],
+    "x_max_y_max": [
+      0,
+      390
+    ]
+  },
+  "files": {
+    "occupancy_npy": "Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_occupancy_h10_infl2.npy",
+    "occupancy_png": "Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_occupancy_h10_infl2.png",
+    "metadata_json": "Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_occupancy_h10_infl2.json"
+  },
+  "coordinate_frame": {
+    "name": "airsim_local_ned",
+    "origin": "vehicle_spawn",
+    "origin_local_xy": [
+      0.0,
+      0.0
+    ],
+    "origin_pixel": {
+      "row": 170,
+      "col": 200
+    },
+    "row_axis": "-x",
+    "col_axis": "+y",
+    "ue_spawn_origin_cm": {
+      "x": 1910.0,
+      "y": -458.0,
+      "z": 100.0
+    },
+    "ue_to_airsim_local": "x=(ue_x-origin_x)/100, y=(ue_y-origin_y)/100, z=-(ue_z-origin_z)/100",
+    "legacy_crop_correction": "old crop used row=+x; actual saved x range is mirrored around camera center x=15"
+  }
+}

@@ -2,6 +2,92 @@
   "SettingsVersion": 1.2,
   "SimMode": "Multirotor",
   "ViewMode": "Manual",
+  "CameraDefaults": {
+    "CaptureSettings": [
+      {
+        "ImageType": 0,
+        "Width": 256,
+        "Height": 256,
+        "FOV_Degrees": 90,
+        "MotionBlurAmount": 0
+      },
+      {
+        "ImageType": 1,
+        "Width": 256,
+        "Height": 256,
+        "FOV_Degrees": 90,
+        "MotionBlurAmount": 0
+      },
+      {
+        "ImageType": 2,
+        "Width": 256,
+        "Height": 256,
+        "FOV_Degrees": 90,
+        "MotionBlurAmount": 0
+      },
+      {
+        "ImageType": 3,
+        "Width": 256,
+        "Height": 256,
+        "FOV_Degrees": 90,
+        "MotionBlurAmount": 0
+      },
+      {
+        "ImageType": 5,
+        "Width": 256,
+        "Height": 256,
+        "FOV_Degrees": 90,
+        "MotionBlurAmount": 0
+      }
+    ]
+  },
+  "ExternalCameras": {
+    "TopDownFollowCamera_1": {
+      "X": 0,
+      "Y": 0,
+      "Z": -60,
+      "Yaw": 0,
+      "Pitch": -90,
+      "Roll": 0,
+      "CaptureSettings": [
+        {
+          "ImageType": 0,
+          "Width": 256,
+          "Height": 256,
+          "FOV_Degrees": 90,
+          "MotionBlurAmount": 0
+        },
+        {
+          "ImageType": 1,
+          "Width": 780,
+          "Height": 620,
+          "FOV_Degrees": 60,
+          "MotionBlurAmount": 0
+        },
+        {
+          "ImageType": 2,
+          "Width": 780,
+          "Height": 620,
+          "FOV_Degrees": 60,
+          "MotionBlurAmount": 0
+        },
+        {
+          "ImageType": 3,
+          "Width": 780,
+          "Height": 620,
+          "FOV_Degrees": 60,
+          "MotionBlurAmount": 0
+        },
+        {
+          "ImageType": 5,
+          "Width": 256,
+          "Height": 256,
+          "FOV_Degrees": 90,
+          "MotionBlurAmount": 0
+        }
+      ]
+    }
+  },
   "PawnPaths": {
     "MyDronePawn": {
       "PawnBP": "Class'/Game/BP/BP_MyFlyingPawn.BP_MyFlyingPawn_C'"

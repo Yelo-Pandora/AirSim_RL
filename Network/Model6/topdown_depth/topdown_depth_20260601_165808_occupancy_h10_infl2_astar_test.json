@@ -1,0 +1,120 @@
+{
+  "mapping": "row=(x_max-x)/mpp_x; col=(y-y_min)/mpp_y",
+  "coverage": {
+    "x_min": -180.0,
+    "x_max": 170.0,
+    "y_min": -200.0,
+    "y_max": 190.0,
+    "world_x_npy_order": "bottom_to_top",
+    "world_y_npy_order": "left_to_right"
+  },
+  "origin_pixel": {
+    "row": 170,
+    "col": 200
+  },
+  "original_start": {
+    "world": [
+      -23,
+      121,
+      -8
+    ],
+    "pixel": [
+      193,
+      321
+    ],
+    "occupied": false
+  },
+  "original_goal": {
+    "world": [
+      -92,
+      91,
+      -9.9
+    ],
+    "pixel": [
+      262,
+      291
+    ],
+    "occupied": false
+  },
+  "astar_targets": [
+    {
+      "index": 0,
+      "world": [
+        -23,
+        121,
+        -8
+      ],
+      "pixel": [
+        193,
+        321
+      ],
+      "occupied": false
+    },
+    {
+      "index": 1,
+      "world": [
+        -33,
+        100,
+        -8.587361
+      ],
+      "pixel": [
+        203,
+        300
+      ],
+      "occupied": false
+    },
+    {
+      "index": 2,
+      "world": [
+        -36,
+        96,
+        -8.711569
+      ],
+      "pixel": [
+        206,
+        296
+      ],
+      "occupied": false
+    },
+    {
+      "index": 3,
+      "world": [
+        -37,
+        95,
+        -8.745702
+      ],
+      "pixel": [
+        207,
+        295
+      ],
+      "occupied": false
+    },
+    {
+      "index": 4,
+      "world": [
+        -66,
+        94,
+        -9.282178
+      ],
+      "pixel": [
+        236,
+        294
+      ],
+      "occupied": false
+    },
+    {
+      "index": 5,
+      "world": [
+        -92,
+        91,
+        -9.9
+      ],
+      "pixel": [
+        262,
+        291
+      ],
+      "occupied": false
+    }
+  ],
+  "image": "E:\\AirSim_RL\\Network\\Model6\\topdown_depth\\topdown_depth_20260601_165808_occupancy_h10_infl2_astar_test.png"
+}
