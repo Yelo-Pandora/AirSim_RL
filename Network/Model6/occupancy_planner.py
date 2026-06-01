@@ -158,6 +158,7 @@ class TopDownOccupancyGrid(OccupancyGrid):
     """
 
     def __init__(self, metadata, occupied):
+        self.metadata = metadata
         coverage = metadata["coverage"]
         meters_per_pixel = metadata["meters_per_pixel"]
         self.resolution_x = float(meters_per_pixel["x"])
@@ -284,6 +285,7 @@ class OccupancyAStarPlanner:
 
     def __init__(self, client):
         self.client = client
+        self._enforce_target_clearance = True
 
     def plan(self, start, goal):
         start = np.asarray(start, dtype=np.float32)
@@ -310,6 +312,7 @@ class OccupancyAStarPlanner:
             # A* needs start/goal free; work on a copy so base_grid stays intact for LOS.
             grid = self._inflate_grid(base_grid, safety_margin)
             grid = self._clear_start_goal(grid, start, goal)
+            clearance_cost = self._build_clearance_cost(grid)
             raw_start = grid.world_to_cell(start)
             raw_goal = grid.world_to_cell(goal)
             start_cell, goal_cell = self._nearest_reachable_endpoint_cells(
@@ -317,6 +320,7 @@ class OccupancyAStarPlanner:
                 raw_start,
                 raw_goal,
                 config.OCCUPANCY_NEAREST_FREE_RADIUS,
+                clearance_cost=clearance_cost,
             )
             last_cells = (start_cell, goal_cell)
             print(
@@ -326,7 +330,7 @@ class OccupancyAStarPlanner:
             if start_cell is None or goal_cell is None:
                 continue
 
-            cells = self._astar(grid, start_cell, goal_cell)
+            cells = self._astar(grid, start_cell, goal_cell, clearance_cost=clearance_cost)
             if cells is None:
                 continue
 
@@ -346,18 +350,78 @@ class OccupancyAStarPlanner:
             if len(local_targets) < 2:
                 print(f"[Model6] Reject occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
                 continue
-            return {
-                "points": local_targets,
-                "node_ids": [f"astar_{index}" for index in range(len(local_targets))],
-                "regions": ["occupancy"] * len(local_targets),
-                "k_neighbors": 0,
-                "max_edge_distance": 0.0,
-                "path_length": self.path_length(local_targets),
-                "planner": "occupancy",
-                "grid_cells": len(cells),
-            }
+            return self._make_plan(local_targets, cells, "occupancy")
+
+        if config.OCCUPANCY_LEGACY_FALLBACK:
+            print("[Model6] Safe occupancy A* failed; retrying legacy A* without clearance penalties.")
+            legacy_plan = self._plan_legacy(base_grid, start, goal)
+            if legacy_plan is not None:
+                return legacy_plan
 
         raise RuntimeError(f"Occupancy A* failed. Last cells={last_cells}")
+
+    def _make_plan(self, local_targets, cells, planner):
+        return {
+            "points": local_targets,
+            "node_ids": [f"astar_{index}" for index in range(len(local_targets))],
+            "regions": ["occupancy"] * len(local_targets),
+            "k_neighbors": 0,
+            "max_edge_distance": 0.0,
+            "path_length": self.path_length(local_targets),
+            "planner": planner,
+            "grid_cells": len(cells),
+        }
+
+    def _plan_legacy(self, base_grid, start, goal):
+        last_cells = None
+        previous_enforcement = self._enforce_target_clearance
+        self._enforce_target_clearance = False
+        try:
+            for _, safety_margin in config.OCCUPANCY_RADIUS_FALLBACKS:
+                grid = self._inflate_grid(base_grid, safety_margin)
+                grid = self._clear_start_goal(grid, start, goal)
+                raw_start = grid.world_to_cell(start)
+                raw_goal = grid.world_to_cell(goal)
+                start_cell, goal_cell = self._nearest_reachable_endpoint_cells(
+                    grid,
+                    raw_start,
+                    raw_goal,
+                    config.OCCUPANCY_NEAREST_FREE_RADIUS,
+                )
+                last_cells = (start_cell, goal_cell)
+                print(
+                    f"[Model6] Legacy occupancy A*: grid={grid.width}x{grid.height}, "
+                    f"occupied={grid.occupied_ratio():.1%}, safety_margin={safety_margin:.1f}"
+                )
+                if start_cell is None or goal_cell is None:
+                    continue
+
+                cells = self._astar(grid, start_cell, goal_cell)
+                if cells is None:
+                    continue
+
+                raw_points = self._cells_to_points(
+                    grid,
+                    cells,
+                    start,
+                    goal,
+                    keep_original_endpoints=False,
+                )
+                try:
+                    local_targets = self._extract_local_targets(base_grid, raw_points)
+                except RuntimeError as exc:
+                    print(f"[Model6] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                    continue
+                if len(local_targets) < 2:
+                    print(f"[Model6] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
+                    continue
+                print("[Model6] WARNING: using legacy occupancy fallback; local targets may be closer to obstacles.")
+                return self._make_plan(local_targets, cells, "occupancy_legacy")
+        finally:
+            self._enforce_target_clearance = previous_enforcement
+
+        print(f"[Model6] Legacy occupancy A* also failed. Last cells={last_cells}")
+        return None
 
     def _bounds(self, start, goal):
         start = np.asarray(start, dtype=np.float32)
@@ -640,11 +704,11 @@ class OccupancyAStarPlanner:
             working.clear_disc(goal[:2], clear_radius)
         return working
 
-    def _nearest_reachable_endpoint_cells(self, grid, raw_start, raw_goal, radius):
+    def _nearest_reachable_endpoint_cells(self, grid, raw_start, raw_goal, radius, clearance_cost=None):
         start_cell = grid.nearest_free(raw_start, radius)
         goal_cell = grid.nearest_free(raw_goal, radius)
         if start_cell is not None and goal_cell is not None:
-            if self._astar(grid, start_cell, goal_cell) is not None:
+            if self._astar(grid, start_cell, goal_cell, clearance_cost=clearance_cost) is not None:
                 return start_cell, goal_cell
 
         max_radius = max(int(math.ceil(radius * 3.0)), int(math.ceil(radius + 24.0)))
@@ -717,7 +781,49 @@ class OccupancyAStarPlanner:
                 component_id += 1
         return components
 
-    def _astar(self, grid, start, goal):
+    def _build_clearance_cost(self, grid):
+        min_clearance = self._effective_target_clearance(grid, config.OCCUPANCY_ASTAR_MIN_CLEARANCE)
+        preferred_clearance = self._effective_target_clearance(grid, config.OCCUPANCY_ASTAR_PREFERRED_CLEARANCE)
+        if preferred_clearance <= 0.0 or preferred_clearance <= min_clearance:
+            return None
+
+        radius_cells = int(math.ceil(preferred_clearance / grid.resolution))
+        cost = np.zeros(grid.occupied.shape, dtype=np.float32)
+        occupied_axis0, occupied_axis1 = np.where(grid.occupied)
+        for axis0, axis1 in zip(occupied_axis0, occupied_axis1):
+            occupied_cell = (axis0, axis1) if isinstance(grid, TopDownOccupancyGrid) else (axis1, axis0)
+            for d0 in range(-radius_cells, radius_cells + 1):
+                for d1 in range(-radius_cells, radius_cells + 1):
+                    distance = math.hypot(d0, d1) * grid.resolution
+                    if distance > preferred_clearance:
+                        continue
+                    near_cell = (occupied_cell[0] + d0, occupied_cell[1] + d1)
+                    if not grid.in_bounds(near_cell):
+                        continue
+                    if not grid.is_free(near_cell):
+                        continue
+                    if distance < min_clearance:
+                        self._set_cell_cost(grid, cost, near_cell, np.inf)
+                    else:
+                        penalty = (preferred_clearance - distance) / (preferred_clearance - min_clearance)
+                        old_cost = self._cell_cost(grid, cost, near_cell)
+                        self._set_cell_cost(grid, cost, near_cell, max(old_cost, float(penalty)))
+        return cost
+
+    @staticmethod
+    def _cell_cost(grid, cost, cell):
+        if isinstance(grid, TopDownOccupancyGrid):
+            return float(cost[cell[0], cell[1]])
+        return float(cost[cell[1], cell[0]])
+
+    @staticmethod
+    def _set_cell_cost(grid, cost, cell, value):
+        if isinstance(grid, TopDownOccupancyGrid):
+            cost[cell[0], cell[1]] = value
+        else:
+            cost[cell[1], cell[0]] = value
+
+    def _astar(self, grid, start, goal, clearance_cost=None):
         if not grid.is_free(start) or not grid.is_free(goal):
             return None
         open_heap = [(0.0, start)]
@@ -737,6 +843,13 @@ class OccupancyAStarPlanner:
                 if not grid.is_free(neighbor):
                     continue
                 step_cost = math.hypot(neighbor[0] - current[0], neighbor[1] - current[1])
+                if clearance_cost is not None:
+                    cell_clearance_cost = self._cell_cost(grid, clearance_cost, neighbor)
+                    if math.isinf(cell_clearance_cost):
+                        if neighbor != goal and neighbor != start:
+                            continue
+                    else:
+                        step_cost += step_cost * config.OCCUPANCY_ASTAR_CLEARANCE_COST_WEIGHT * cell_clearance_cost
                 tentative = g_score[current] + step_cost
                 if tentative >= g_score.get(neighbor, float("inf")):
                     continue
@@ -821,23 +934,49 @@ class OccupancyAStarPlanner:
             should_keep_spacing = dist_from_last >= config.LOCAL_TARGET_SPACING
 
             if should_keep_turn or should_keep_spacing:
-                if grid.is_line_clear(last_selected, current):
-                    selected.append(current)
-                    last_selected = current
+                if not self._enforce_target_clearance:
+                    if grid.is_line_clear(last_selected, current):
+                        selected.append(current)
+                        last_selected = current
+                    else:
+                        self._append_reachable_target_or_bridge(grid, selected, raw_points, last_selected, current, index)
+                        last_selected = selected[-1]
+                        previous_direction = None
+                    previous_direction = direction
+                    continue
+
+                safe_current = self._safe_target_near_index(
+                    grid,
+                    raw_points,
+                    index,
+                    last_selected,
+                    min_distance=config.LOCAL_TARGET_MIN_SPACING,
+                )
+                if safe_current is not None:
+                    selected.append(safe_current)
+                    last_selected = safe_current
                 else:
                     # LOS blocked: insert the furthest free point with clear LOS.
                     backtrack_found = False
                     for k in range(index - 1, 0, -1):
                         bt = raw_points[k]
                         bt_cell = grid.world_to_cell(bt)
-                        if grid.is_free(bt_cell) and grid.is_line_clear(last_selected, bt):
+                        if (
+                            grid.is_free(bt_cell)
+                            and self._has_target_clearance(grid, bt)
+                            and grid.is_line_clear(last_selected, bt)
+                        ):
                             selected.append(bt)
                             last_selected = bt
                             backtrack_found = True
                             break
                     # Only append current if it's free AND reachable from last_selected.
                     cur_cell = grid.world_to_cell(current)
-                    if grid.is_free(cur_cell) and grid.is_line_clear(last_selected, current):
+                    if (
+                        grid.is_free(cur_cell)
+                        and self._has_target_clearance(grid, current)
+                        and grid.is_line_clear(last_selected, current)
+                    ):
                         selected.append(current)
                         last_selected = current
                     elif not backtrack_found:
@@ -898,6 +1037,70 @@ class OccupancyAStarPlanner:
 
         return selected
 
+    def _append_reachable_target_or_bridge(self, grid, selected, raw_points, last_selected, current, index):
+        backtrack_found = False
+        for k in range(index - 1, 0, -1):
+            bt = raw_points[k]
+            bt_cell = grid.world_to_cell(bt)
+            if grid.is_free(bt_cell) and grid.is_line_clear(last_selected, bt):
+                selected.append(bt)
+                last_selected = bt
+                backtrack_found = True
+                break
+        cur_cell = grid.world_to_cell(current)
+        if grid.is_free(cur_cell) and grid.is_line_clear(last_selected, current):
+            selected.append(current)
+        elif not backtrack_found:
+            pass
+
+    def _has_target_clearance(self, grid, point, clearance=None):
+        if clearance is None:
+            clearance = config.LOCAL_TARGET_CLEARANCE
+        clearance = self._effective_target_clearance(grid, clearance)
+        cell = grid.world_to_cell(point)
+        if not grid.is_free(cell):
+            return False
+        if clearance <= 0.0:
+            return True
+
+        radius_cells = int(math.ceil(clearance / grid.resolution))
+        for d0 in range(-radius_cells, radius_cells + 1):
+            for d1 in range(-radius_cells, radius_cells + 1):
+                if math.hypot(d0, d1) * grid.resolution > clearance:
+                    continue
+                neighbor = (cell[0] + d0, cell[1] + d1)
+                if not grid.in_bounds(neighbor) or not grid.is_free(neighbor):
+                    return False
+        return True
+
+    @staticmethod
+    def _effective_target_clearance(grid, clearance):
+        clearance = float(clearance)
+        if not isinstance(grid, TopDownOccupancyGrid):
+            return clearance
+        inflated = float(grid.metadata.get("inflate_meters", 0.0))
+        return max(0.0, clearance - inflated)
+
+    def _safe_target_near_index(self, grid, raw_points, preferred_index, last_selected, min_distance=0.0):
+        max_offset = max(int(math.ceil(config.LOCAL_TARGET_SPACING / grid.resolution)), 1)
+        last_raw_index = len(raw_points) - 2
+        for offset in range(0, max_offset + 1):
+            candidate_indices = [preferred_index] if offset == 0 else [
+                preferred_index - offset,
+                preferred_index + offset,
+            ]
+            for candidate_index in candidate_indices:
+                if candidate_index < 1 or candidate_index > last_raw_index:
+                    continue
+                candidate = raw_points[candidate_index]
+                if float(np.linalg.norm(candidate - last_selected)) < float(min_distance):
+                    continue
+                if not self._has_target_clearance(grid, candidate):
+                    continue
+                if grid.is_line_clear(last_selected, candidate):
+                    return candidate
+        return None
+
     def _append_blocked_tail(self, grid, selected, raw_points):
         goal_point = raw_points[-1]
         guard = 0
@@ -916,7 +1119,14 @@ class OccupancyAStarPlanner:
                 candidate_cell = grid.world_to_cell(candidate)
                 if candidate_cell == last_cell:
                     break
-                if grid.is_free(candidate_cell) and grid.is_line_clear(selected[-1], candidate):
+                if (
+                    grid.is_free(candidate_cell)
+                    and (
+                        not self._enforce_target_clearance
+                        or self._has_target_clearance(grid, candidate)
+                    )
+                    and grid.is_line_clear(selected[-1], candidate)
+                ):
                     bridge = candidate
                     break
 
