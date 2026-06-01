@@ -1035,7 +1035,95 @@ class OccupancyAStarPlanner:
         else:
             selected.append(goal_point)
 
+        selected = self._uniform_resample_local_targets(grid, raw_points, selected)
         return selected
+
+    def _uniform_resample_local_targets(self, grid, raw_points, fallback_targets):
+        if not config.LOCAL_TARGET_UNIFORM_RESAMPLE or len(raw_points) <= 2:
+            return fallback_targets
+        if not self._enforce_target_clearance:
+            return fallback_targets
+
+        distances = self._path_cumulative_distances(raw_points)
+        total_length = distances[-1]
+        if total_length <= config.LOCAL_TARGET_MIN_SPACING:
+            return fallback_targets
+
+        segment_count = max(1, len(fallback_targets) - 1)
+        target_spacing = total_length / segment_count
+        min_allowed = config.LOCAL_TARGET_MIN_SPACING
+        max_allowed = config.LOCAL_TARGET_SPACING * (1.0 + config.LOCAL_TARGET_UNIFORM_TOLERANCE)
+        if target_spacing < min_allowed or target_spacing > max_allowed:
+            return fallback_targets
+
+        sampled = [raw_points[0]]
+        last_selected = sampled[0]
+        for sample_index in range(1, segment_count):
+            desired_distance = target_spacing * sample_index
+            preferred_index = self._nearest_path_index_at_distance(distances, desired_distance)
+            candidate = self._safe_target_near_index(
+                grid,
+                raw_points,
+                preferred_index,
+                last_selected,
+                min_distance=config.LOCAL_TARGET_MIN_SPACING,
+            )
+            if candidate is None:
+                return fallback_targets
+            sampled.append(candidate)
+            last_selected = candidate
+
+        goal_point = fallback_targets[-1]
+        if not grid.is_line_clear(sampled[-1], goal_point):
+            return fallback_targets
+        if float(np.linalg.norm(goal_point - sampled[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(sampled) > 1:
+            sampled[-1] = goal_point
+        else:
+            sampled.append(goal_point)
+
+        if len(sampled) < 2:
+            return fallback_targets
+        if not self._is_uniformity_improved(fallback_targets, sampled):
+            return fallback_targets
+        return sampled
+
+    @staticmethod
+    def _path_cumulative_distances(points):
+        distances = [0.0]
+        for index in range(1, len(points)):
+            step = float(np.linalg.norm(points[index] - points[index - 1]))
+            distances.append(distances[-1] + step)
+        return distances
+
+    @staticmethod
+    def _nearest_path_index_at_distance(distances, desired_distance):
+        index = int(np.searchsorted(distances, desired_distance))
+        if index <= 0:
+            return 0
+        if index >= len(distances):
+            return len(distances) - 1
+        before_error = abs(distances[index - 1] - desired_distance)
+        after_error = abs(distances[index] - desired_distance)
+        return index - 1 if before_error <= after_error else index
+
+    @staticmethod
+    def _is_uniformity_improved(old_points, new_points):
+        old_score = OccupancyAStarPlanner._spacing_variation(old_points)
+        new_score = OccupancyAStarPlanner._spacing_variation(new_points)
+        return new_score < old_score
+
+    @staticmethod
+    def _spacing_variation(points):
+        if len(points) < 3:
+            return float("inf")
+        distances = [
+            float(np.linalg.norm(points[index] - points[index - 1]))
+            for index in range(1, len(points))
+        ]
+        mean_distance = float(np.mean(distances))
+        if mean_distance <= 1e-6:
+            return float("inf")
+        return float(np.std(distances) / mean_distance)
 
     def _append_reachable_target_or_bridge(self, grid, selected, raw_points, last_selected, current, index):
         backtrack_found = False
