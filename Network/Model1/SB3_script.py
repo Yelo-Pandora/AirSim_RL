@@ -19,11 +19,16 @@ from reinforcement_network import CustomCombinedExtractor
 from stable_baselines3.common.noise import ActionNoise
 
 
-CURRICULUM_REGION_ORDER = ("1", "2", "3", "4")
-CURRICULUM_STAGE_STEPS = 200_000
+CURRICULUM_REGION_THRESHOLDS = (
+    ("1", 30_000),
+    ("2", 100_000),
+    ("3", 300_000),
+    ("4", 600_000),
+)
+CURRICULUM_TOTAL_TIMESTEPS = CURRICULUM_REGION_THRESHOLDS[-1][1]
 ACTION_NOISE_INITIAL_SIGMA = 0.2
 ACTION_NOISE_FINAL_SIGMA = 0.08
-ACTION_NOISE_DECAY_STEPS = 800_000
+ACTION_NOISE_DECAY_STEPS = CURRICULUM_TOTAL_TIMESTEPS
 
 
 class LinearDecayNormalActionNoise(ActionNoise):
@@ -137,10 +142,13 @@ class TrainingTeleportResetWrapper(gym.Wrapper):
         return first
 
     def _active_regions(self):
-        stage_count = int(self.total_train_steps // CURRICULUM_STAGE_STEPS) + 1
-        stage_count = max(1, min(stage_count, len(CURRICULUM_REGION_ORDER)))
+        stage_count = len(CURRICULUM_REGION_THRESHOLDS)
+        for index, (_, upper_step) in enumerate(CURRICULUM_REGION_THRESHOLDS):
+            if self.total_train_steps < upper_step:
+                stage_count = index + 1
+                break
         return [
-            region for region in CURRICULUM_REGION_ORDER[:stage_count]
+            region for region, _ in CURRICULUM_REGION_THRESHOLDS[:stage_count]
             if region in self.region_pairs
         ]
 
@@ -325,7 +333,7 @@ def main():
     vec_env.env_method("set_total_train_steps", int(model.num_timesteps))
 
     print("Starting training...")
-    total_timesteps = 800000  # 4-region curriculum: unlock one new region every 20w steps
+    total_timesteps = CURRICULUM_TOTAL_TIMESTEPS
     model.learn(
         total_timesteps=total_timesteps,
         tb_log_name="TD3_AirSim_Run1" if tensorboard_enabled else None,  # TensorBoard ????????
