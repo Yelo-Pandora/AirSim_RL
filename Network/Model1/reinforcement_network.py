@@ -146,6 +146,11 @@ class AirSimUAVEnv(gym.Env):
         self.yaw_align_speed_on = 0.2
         self.yaw_align_speed_off = 0.1
         self.max_yaw_step_deg = 20.0
+        self.reset_hover_duration = 2.0
+        self.reset_hover_check_interval = 0.1
+        self.reset_hover_speed_tolerance = 0.25
+        self.reset_hover_required_stable_time = 0.4
+        self.reset_hover_max_extra_wait = 2.0
         self.depth_norm_max = 20.0
         self.lidar_norm_max = 20.0
         self.current_lidar_min_dist = self.lidar_norm_max
@@ -312,26 +317,24 @@ class AirSimUAVEnv(gym.Env):
         return "running"
 
     def _compute_soft_aligned_yaw_deg(self, target_vel):
-        # yaw 对齐的是积分后的期望水平速度方向，而不是 raw action 本身。
-        # yaw 对齐的是积分后的目标水平速度方向，而不是原始动作本身
+        # yaw 对齐的是积分后的目标水平速度方向，而不是原始动作本身。
         speed_xy = float(np.linalg.norm(target_vel[:2]))
         commanded_yaw = float(self.last_commanded_yaw_deg)
 
         if speed_xy >= self.yaw_align_speed_on:
             desired_yaw_deg = math.degrees(math.atan2(float(target_vel[1]), float(target_vel[0])))
         elif speed_xy <= self.yaw_align_speed_off:
-            # 低速时保持上一次朝向，避免机头在近零速度附近抖动
+            # 低速时保持上一次朝向，避免机头在近零速度附近抖动。
             desired_yaw_deg = commanded_yaw
         else:
             desired_yaw_deg = commanded_yaw
 
-        # 每个控制周期限制最大偏航变化量，让转向更平滑
+        # 每个控制周期限制最大偏航变化量，让转向更平滑。
         yaw_delta = self._wrap_angle_deg(desired_yaw_deg - float(self.current_yaw_deg))
         yaw_delta = float(np.clip(yaw_delta, -self.max_yaw_step_deg, self.max_yaw_step_deg))
         commanded_yaw = self._wrap_angle_deg(float(self.current_yaw_deg) + yaw_delta)
         self.last_commanded_yaw_deg = commanded_yaw
         return commanded_yaw
-
 
     # 获取环境需要的信息的函数，包括状态向量和一些判别信息
     def _get_obs(self):
@@ -551,10 +554,10 @@ class AirSimUAVEnv(gym.Env):
             'perpendicular_dist': perpendicular_dist,
         }
         # 收尾部分
-        reward = self._calculate_reward(info)
         terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
         truncated = self.step_count >= self.max_steps
         info['end_reason'] = self._resolve_end_reason(info, terminated=terminated, truncated=truncated)
+        reward = self._calculate_reward(info)
         if terminated or truncated:
             if info['arrived']:
                 self.consecutive_arrivals += 1
@@ -735,53 +738,83 @@ class AirSimUAVEnv(gym.Env):
         except Exception as e:
             print(f"[Trajectory Warning] 绘制轨迹失败: {e}")
 
+    def sample_episode_route(self):
+        selected_region = random.choice(self.available_regions)
+        start_pos, target_pos = random.sample(self.region_points[selected_region], 2)
+        return (
+            np.array(start_pos, dtype=np.float32),
+            np.array(target_pos, dtype=np.float32),
+            selected_region,
+        )
+
+    def stabilize_before_reset(self):
+        """Decelerate to a hover without changing position or yaw."""
+        yaw_mode = airsim.YawMode(is_rate=True, yaw_or_rate=0.0)
+        try:
+            self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+            self.client.armDisarm(True, vehicle_name=self.vehicle_name)
+            self.client.moveByVelocityAsync(
+                0.0,
+                0.0,
+                0.0,
+                float(self.reset_hover_duration),
+                drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+                yaw_mode=yaw_mode,
+                vehicle_name=self.vehicle_name,
+            ).join()
+        except Exception as e:
+            print(f"[Reset Hover Warning] 减速悬停命令失败: {e}")
+
+        try:
+            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        except Exception as e:
+            print(f"[Reset Hover Warning] hoverAsync 失败: {e}")
+
+        stable_time = 0.0
+        deadline = time.time() + float(self.reset_hover_max_extra_wait)
+        interval = float(self.reset_hover_check_interval)
+        while time.time() < deadline and stable_time < float(self.reset_hover_required_stable_time):
+            try:
+                state = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+                vel = state.kinematics_estimated.linear_velocity
+                speed = float(np.linalg.norm([vel.x_val, vel.y_val, vel.z_val]))
+                if speed <= float(self.reset_hover_speed_tolerance):
+                    stable_time += interval
+                else:
+                    stable_time = 0.0
+            except Exception:
+                break
+            time.sleep(interval)
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0
         self.traj_points = []
-        # 如果 options 中没有指定具体的 target，则从数据集中随机选一个        options = options or {}
-        options = options or {}
+        options = dict(options or {})
+        skip_stabilization = bool(options.pop("skip_stabilization", False))
+        if not skip_stabilization:
+            self.stabilize_before_reset()
+
+        # 如果 options 中没有指定具体的 target，则从数据集中随机选一个。
         if "start_pos" in options and "target" in options:
-            start_pos = options["start_pos"]
-            target_pos = options["target"]
+            start_pos = np.array(options["start_pos"], dtype=np.float32)
+            target_pos = np.array(options["target"], dtype=np.float32)
             selected_region = options.get("region", "manual")
         else:
-            selected_region = random.choice(self.available_regions)
-            start_pos, target_pos = random.sample(self.region_points[selected_region], 2)
+            start_pos, target_pos, selected_region = self.sample_episode_route()
 
         self.current_start_pos = np.array(start_pos, dtype=np.float32)
         self.current_target = np.array(target_pos, dtype=np.float32)
         self.current_region = selected_region
-        # 重置airsim环境
+
         self._clear_visual_markers()
-        self.client.reset()
         self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
         self.client.armDisarm(True, vehicle_name=self.vehicle_name)
-        self._clear_visual_markers()
-        # 传送无人机
-        # 在 AirSim 中，Z轴负方向是向上。
-        # 当设置为 -2.0 时，指的是“相对于出生点向上 2 米”
-        start_z = float(start_pos[2]) if float(start_pos[2]) < 0 else -10
-        self.current_start_pos[2] = start_z
-        # 计算起点到终点的二维方向，获取初始偏航角(Yaw)
-        direction = self.current_target - self.current_start_pos
-        if np.linalg.norm([direction[0], direction[1]]) > 1e-5:
-            initial_yaw_rad = math.atan2(direction[1], direction[0])
-        else:
-            initial_yaw_rad = 0.0
-        initial_yaw_deg = math.degrees(initial_yaw_rad)
-        self.current_yaw_deg = initial_yaw_deg
-        self.last_commanded_yaw_deg = initial_yaw_deg
-        pose = airsim.Pose(
-            airsim.Vector3r(float(start_pos[0]), float(start_pos[1]), start_z),
-            airsim.to_quaternion(0.0, 0.0, initial_yaw_rad),
-        )
-        # 注意：必须调用 simSetVehiclePose，并等待它生效
-        self.client.simSetVehiclePose(pose, True, vehicle_name=self.vehicle_name)
-        time.sleep(0.5) # 给物理引擎一点时间来应用位置突变
-        # 确保每次重置后处于悬停状态
-        self.client.moveByVelocityAsync(0, 0, 0, 1, vehicle_name=self.vehicle_name)
-        time.sleep(1.0) # 延长重置等待时间，确保飞机被稳稳托在空中
+
+        obs = self._get_obs()
+        self.current_start_pos = (self.current_target - self.current_rel_pos).astype(np.float32)
+        self.start_rel_pos = self.current_rel_pos.copy()
+        self.last_commanded_yaw_deg = float(self.current_yaw_deg)
 
         # 生成 16 个等间距航点 (15个中间点 + 1个终点)
         self.waypoints = []
@@ -793,11 +826,6 @@ class AirSimUAVEnv(gym.Env):
         self.passed_waypoints_mask = np.zeros(16, dtype=bool)
         # 绘制当前回合的终点、起点、航点和参考路径
         self._draw_goal_marker()
-
-
-        # reset 后不再注入额外初速度，首拍运动完全交给策略动作决定。
-        obs = self._get_obs()
-        self.start_rel_pos = self.current_rel_pos.copy()
 
         # 使用目标和起点的绝对距离来计算 start_dist
         # 防止 kin[0:3] 相对坐标原点偏差导致 D 计算过小
@@ -883,12 +911,18 @@ class AirSimUAVEnv(gym.Env):
         # 总距离奖励
         r_z = r_z_bottom + r_z_top
         lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
-        if 0.5 <= lidar_min_dist < 1:
+        if 2.0 <= lidar_min_dist < 3.0:
             r_lidar_clearance = -0.05 * self.lidar_clearance_weight
-        elif 0.3 <= lidar_min_dist < 0.5:
+        elif 1.5 <= lidar_min_dist < 2.0:
             r_lidar_clearance = -0.1 * self.lidar_clearance_weight
+        elif 1.0 <= lidar_min_dist < 1.5:
+            r_lidar_clearance = -0.2 * self.lidar_clearance_weight
+        elif 0.5 <= lidar_min_dist < 1.0:
+            r_lidar_clearance = -0.4 * self.lidar_clearance_weight
+        elif 0.3 <= lidar_min_dist < 0.5:
+            r_lidar_clearance = -0.8 * self.lidar_clearance_weight
         elif lidar_min_dist < 0.3:
-            r_lidar_clearance = (-0.2 / lidar_min_dist) * self.lidar_clearance_weight
+            r_lidar_clearance = -1.2 * self.lidar_clearance_weight
         else:
             r_lidar_clearance = 0
         r_collision = r_failure + r_z + r_lidar_clearance
@@ -906,9 +940,10 @@ class AirSimUAVEnv(gym.Env):
             r_vel = 0
         r_stabilization = r_ang + r_vel
 
-        r_survival = 0.5 if not (info['collision'] or info.get('out_of_ceiling', False)) else 0.0
+        r_time = -0.05
+        r_timeout = -200 if info.get('end_reason') == "timeout" else 0
 
-        return r_progress + r_path + r_collision + r_stabilization + r_survival
+        return r_progress + r_path + r_collision + r_stabilization + r_time + r_timeout
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """
