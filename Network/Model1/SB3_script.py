@@ -29,6 +29,12 @@ CURRICULUM_TOTAL_TIMESTEPS = CURRICULUM_REGION_THRESHOLDS[-1][1]
 ACTION_NOISE_INITIAL_SIGMA = 0.2
 ACTION_NOISE_FINAL_SIGMA = 0.08
 ACTION_NOISE_DECAY_STEPS = CURRICULUM_TOTAL_TIMESTEPS
+ALL_REGION_SAMPLING_WEIGHTS = {
+    "1": 0.15,
+    "2": 0.15,
+    "3": 0.35,
+    "4": 0.35,
+}
 
 
 class LinearDecayNormalActionNoise(ActionNoise):
@@ -114,19 +120,7 @@ class TrainingTeleportResetWrapper(gym.Wrapper):
             return route
 
         active_regions = self._active_regions()
-        active_pairs = [
-            (region, pair_index, point_a, point_b)
-            for region in active_regions
-            for pair_index, point_a, point_b in self.region_pairs.get(region, [])
-        ]
-        if not active_pairs:
-            active_pairs = [
-                (region, pair_index, point_a, point_b)
-                for region, pairs in self.region_pairs.items()
-                for pair_index, point_a, point_b in pairs
-            ]
-
-        region, pair_index, point_a, point_b = random.choice(active_pairs)
+        region, pair_index, point_a, point_b = self._sample_active_pair(active_regions)
         if random.random() < 0.5:
             first = (point_a, point_b, region)
             second = (point_b, point_a, region)
@@ -140,6 +134,51 @@ class TrainingTeleportResetWrapper(gym.Wrapper):
             f"region={region} pair={pair_index}"
         )
         return first
+
+    def _sample_active_pair(self, active_regions):
+        if self._has_all_curriculum_regions(active_regions):
+            region = self._weighted_choice(ALL_REGION_SAMPLING_WEIGHTS)
+            pair_index, point_a, point_b = random.choice(self.region_pairs[region])
+            return region, pair_index, point_a, point_b
+
+        active_regions = [
+            region for region in active_regions
+            if self.region_pairs.get(region)
+        ]
+        if not active_regions:
+            active_regions = [
+                region for region, pairs in self.region_pairs.items()
+                if pairs
+            ]
+
+        region = random.choice(active_regions)
+        pair_index, point_a, point_b = random.choice(self.region_pairs[region])
+        return region, pair_index, point_a, point_b
+
+    def _has_all_curriculum_regions(self, active_regions):
+        required_regions = set(ALL_REGION_SAMPLING_WEIGHTS)
+        return required_regions.issubset(set(active_regions))
+
+    def _weighted_choice(self, weights):
+        total_weight = sum(
+            weight for region, weight in weights.items()
+            if self.region_pairs.get(region)
+        )
+        if total_weight <= 0.0:
+            return random.choice([
+                region for region, pairs in self.region_pairs.items()
+                if pairs
+            ])
+
+        threshold = random.random() * total_weight
+        cumulative = 0.0
+        for region, weight in weights.items():
+            if not self.region_pairs.get(region):
+                continue
+            cumulative += weight
+            if threshold <= cumulative:
+                return region
+        return next(region for region in reversed(weights) if self.region_pairs.get(region))
 
     def _active_regions(self):
         stage_count = len(CURRICULUM_REGION_THRESHOLDS)
