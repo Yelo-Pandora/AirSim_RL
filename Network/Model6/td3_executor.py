@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -88,7 +89,13 @@ class TD3SegmentExecutor:
                 print(f"[Model6] Segment {segment_index} starts from actual pos {start} "
                       f"(planned waypoint was {points[segment_index]})")
 
-            summary = self.execute_segment(segment_index, start, target, is_final_segment=is_final_segment)
+            summary = self.execute_segment(
+                segment_index,
+                start,
+                target,
+                is_final_segment=is_final_segment,
+                teleport_to_start=segment_index == 0,
+            )
             summaries.append(summary)
             if not summary["arrived"] and config.STOP_ON_SEGMENT_FAILURE:
                 print(f"[Model6] Stop after failed segment {segment_index}.")
@@ -108,13 +115,29 @@ class TD3SegmentExecutor:
                 return self.env.current_start_pos.copy()
             return np.array([0.0, 0.0, -2.0], dtype=np.float32)
 
-    def execute_segment(self, segment_index, start, target, is_final_segment=False):
+    def execute_segment(
+        self,
+        segment_index,
+        start,
+        target,
+        is_final_segment=False,
+        teleport_to_start=False,
+    ):
         print(f"[Model6] Segment {segment_index}: {start} -> {target}")
-        obs, _ = self.env.reset(options={
+        start = np.array(start, dtype=np.float32)
+        target = np.array(target, dtype=np.float32)
+        if teleport_to_start:
+            start = self._teleport_to_segment_start(start)
+
+        reset_options = {
             "start_pos": start.tolist(),
             "target": target.tolist(),
             "region": f"model6_segment_{segment_index}",
-        })
+        }
+        if teleport_to_start:
+            reset_options["skip_stabilization"] = True
+
+        obs, _ = self.env.reset(options=reset_options)
 
         total_reward = 0.0
         last_info = {}
@@ -167,6 +190,58 @@ class TD3SegmentExecutor:
             "distance": distance,
             "axis_error": self._axis_error_to_target(target).tolist(),
         }
+
+    def _teleport_to_segment_start(self, start):
+        """Teleport the first Model6 segment to the planned global start."""
+        import airsim
+
+        start = np.array(start, dtype=np.float32).copy()
+        if float(start[2]) >= 0.0:
+            start[2] = -10.0
+
+        yaw_rad = self._current_yaw_rad()
+        pose = airsim.Pose(
+            airsim.Vector3r(float(start[0]), float(start[1]), float(start[2])),
+            airsim.to_quaternion(0.0, 0.0, yaw_rad),
+        )
+
+        print(f"[Model6] Teleporting first segment start to {start}")
+        try:
+            self.env.client.reset()
+            self.env.client.enableApiControl(True, vehicle_name=self.env.vehicle_name)
+            self.env.client.armDisarm(True, vehicle_name=self.env.vehicle_name)
+            self.env.client.simSetVehiclePose(
+                pose,
+                True,
+                vehicle_name=self.env.vehicle_name,
+            )
+            time.sleep(0.5)
+            self.env.client.moveByVelocityAsync(
+                0.0,
+                0.0,
+                0.0,
+                0.5,
+                drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+                yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=0.0),
+                vehicle_name=self.env.vehicle_name,
+            ).join()
+        except Exception as exc:
+            print(f"[Model6] Start teleport failed: {exc}")
+        return start
+
+    def _current_yaw_rad(self):
+        try:
+            import airsim
+
+            state = self.env.client.getMultirotorState(
+                vehicle_name=self.env.vehicle_name,
+            )
+            _, _, yaw_rad = airsim.to_eularian_angles(
+                state.kinematics_estimated.orientation,
+            )
+            return float(yaw_rad)
+        except Exception:
+            return 0.0
 
     def _axis_error_to_target(self, target):
         if hasattr(self.env, "current_rel_pos"):
