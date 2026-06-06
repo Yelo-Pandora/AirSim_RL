@@ -59,6 +59,10 @@ LOCAL_TARGET_KEEP_TURNS = True
 LOCAL_TARGET_CLEARANCE = 3.0
 LOCAL_TARGET_UNIFORM_RESAMPLE = True
 LOCAL_TARGET_UNIFORM_TOLERANCE = 0.35
+# Intermediate target cruise altitude is in meters above ground.  AirSim uses
+# NED coordinates, so runtime z becomes OCCUPANCY_GROUND_Z - altitude.
+LOCAL_TARGET_RANDOMIZE_INTERMEDIATE_ALTITUDE = True
+LOCAL_TARGET_INTERMEDIATE_ALTITUDE_RANGE = (10.0, 14.0)
 
 # Fallback planner: graph A* over offline feasible navigation points.
 GRAPH_K_NEIGHBORS = 8
