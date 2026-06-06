@@ -30,6 +30,10 @@ if MODEL6_DIR not in sys.path:
 
 from reinforcement_network import AirSimUAVEnv
 from graph_planner import WaypointGraphPlanner
+from local_target_utils import (
+    format_local_target_altitudes,
+    randomize_intermediate_target_altitudes,
+)
 from occupancy_planner import OccupancyAStarPlanner
 from td3_executor import TD3SegmentExecutor
 import config as model6_config
@@ -73,18 +77,15 @@ class NavPipeline:
             self.executor = TD3SegmentExecutor(model_path=self.model_path)
 
             safety = None
-            needs_airsim_safety = (
-                self.planner_mode == "occupancy" or
-                model6_config.VALIDATE_WAYPOINTS_WITH_AIRSIM
-            )
+            needs_airsim_safety = model6_config.VALIDATE_WAYPOINTS_WITH_AIRSIM
             if needs_airsim_safety:
                 from waypoint_safety import AirSimWaypointSafety
                 safety = AirSimWaypointSafety(self.executor.env.client)
 
             if self.planner_mode == "occupancy":
-                if safety is None:
-                    return False, "Occupancy planner requires AirSim obstacle centers."
-                self.planner = OccupancyAStarPlanner(safety.obstacle_centers)
+                self.planner = OccupancyAStarPlanner(
+                    client=self.executor.env.client,
+                )
             elif model6_config.VALIDATE_WAYPOINTS_WITH_AIRSIM:
                 self.planner = WaypointGraphPlanner(waypoint_filter=safety.is_safe)
             else:
@@ -101,10 +102,12 @@ class NavPipeline:
             
         try:
             plan = self.planner.plan(start_pos, end_pos)
+            plan = randomize_intermediate_target_altitudes(plan)
             waypoints = plan["points"]
             return waypoints, (
                 f"Path planned via {plan.get('planner', self.planner_mode)} "
-                f"(Points: {len(waypoints)}, Dist: {plan['path_length']:.1f}m)."
+                f"(Points: {len(waypoints)}, Dist: {plan['path_length']:.1f}m). "
+                f"Local target z/alt: {format_local_target_altitudes(waypoints)}"
             )
         except Exception as e:
             return None, f"Planning error: {e}"
@@ -161,6 +164,8 @@ class NavPipeline:
                     status_callback(f"Task {idx+1} failed at planning: {msg}")
                 results.append({'task_id': idx+1, 'status': 'planning_failed', 'msg': msg})
                 continue
+            if status_callback:
+                status_callback(msg)
             
             # 2. Navigate
             success, nav_msg = self.run_navigation(waypoints, status_callback=None) # Keep quiet during batch

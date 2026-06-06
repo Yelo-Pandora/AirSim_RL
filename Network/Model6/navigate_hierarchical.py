@@ -14,6 +14,7 @@ if config.PROJECT_ROOT not in sys.path:
     sys.path.insert(0, config.PROJECT_ROOT)
 
 from graph_planner import WaypointGraphPlanner
+from local_target_utils import randomize_intermediate_target_altitudes
 from occupancy_planner import OccupancyAStarPlanner
 from td3_executor import TD3SegmentExecutor
 
@@ -25,58 +26,6 @@ def print_plan(plan):
     )
     for index, point in enumerate(plan["points"]):
         print(f"  [{index:02d}] {plan['node_ids'][index]} region={plan['regions'][index]} point={point}")
-
-
-def randomize_intermediate_target_altitudes(plan):
-    """Randomize intermediate local target altitude for safer cruise."""
-    if not config.LOCAL_TARGET_RANDOMIZE_INTERMEDIATE_ALTITUDE:
-        return plan
-
-    points = plan.get("points", [])
-    if len(points) <= 2:
-        return plan
-
-    min_altitude, max_altitude = config.LOCAL_TARGET_INTERMEDIATE_ALTITUDE_RANGE
-    min_altitude = float(min_altitude)
-    max_altitude = float(max_altitude)
-    if min_altitude > max_altitude:
-        min_altitude, max_altitude = max_altitude, min_altitude
-
-    adjusted_points = [
-        np.array(point, dtype=np.float32).copy()
-        for point in points
-    ]
-    rng = np.random.default_rng()
-    altitudes = rng.uniform(
-        min_altitude,
-        max_altitude,
-        size=len(adjusted_points) - 2,
-    )
-    for point, altitude in zip(adjusted_points[1:-1], altitudes):
-        point[2] = float(config.OCCUPANCY_GROUND_Z - altitude)
-
-    adjusted_plan = dict(plan)
-    adjusted_plan["points"] = adjusted_points
-    adjusted_plan["path_length"] = path_length(adjusted_points)
-    ned_low = config.OCCUPANCY_GROUND_Z - max_altitude
-    ned_high = config.OCCUPANCY_GROUND_Z - min_altitude
-    print(
-        "[Model6] Intermediate local target altitude randomized: "
-        f"{min_altitude:.1f}-{max_altitude:.1f}m AGL "
-        f"(NED z {ned_low:.1f} to {ned_high:.1f})."
-    )
-    return adjusted_plan
-
-
-def path_length(points):
-    if len(points) < 2:
-        return 0.0
-    return float(
-        sum(
-            np.linalg.norm(points[index] - points[index - 1])
-            for index in range(1, len(points))
-        )
-    )
 
 
 def create_airsim_client():
