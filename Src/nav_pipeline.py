@@ -20,9 +20,9 @@ except ImportError:
     torch = None
     TD3 = None
 
-# Add Model1 and Model6 to path
-MODEL1_DIR = os.path.join(REPO_ROOT, "Network", "Model1")
-MODEL6_DIR = os.path.join(REPO_ROOT, "Network", "Model6")
+# Add TD3_base and Astar_planner to path
+MODEL1_DIR = os.path.join(REPO_ROOT, "Network", "TD3_base")
+MODEL6_DIR = os.path.join(REPO_ROOT, "Network", "Astar_planner")
 if MODEL1_DIR not in sys.path:
     sys.path.insert(0, MODEL1_DIR)
 if MODEL6_DIR not in sys.path:
@@ -68,12 +68,12 @@ class NavPipeline:
             return False, f"Failed to launch AirSim: {e}"
 
     def init_navigation(self):
-        """Initialize environment and load model using Model6 hierarchical components."""
+        """Initialize environment and load model using Astar_planner hierarchical components."""
         if torch is None or TD3 is None:
             return False, "Dependencies missing: torch or stable-baselines3 not found."
             
         try:
-            # Initialize Model6 executor
+            # Initialize Astar_planner executor
             self.executor = TD3SegmentExecutor(model_path=self.model_path)
 
             safety = None
@@ -91,12 +91,12 @@ class NavPipeline:
             else:
                 self.planner = WaypointGraphPlanner()
             
-            return True, f"Hierarchical navigation initialized (Model6, planner={self.planner_mode})."
+            return True, f"Hierarchical navigation initialized (Astar_planner, planner={self.planner_mode})."
         except Exception as e:
             return False, f"Failed to initialize: {e}"
 
     def plan_path(self, start_pos, end_pos):
-        """Run the configured Model6 upper planner."""
+        """Run the configured Astar_planner upper planner."""
         if self.planner is None:
             return None, "Planner not initialized."
             
@@ -113,7 +113,7 @@ class NavPipeline:
             return None, f"Planning error: {e}"
 
     def run_navigation(self, waypoints, status_callback=None):
-        """Execute navigation through waypoints using Lower TD3 Executor (Model6)."""
+        """Execute navigation through waypoints using Lower TD3 Executor (Astar_planner)."""
         if self.executor is None:
             return False, "Executor not initialized."
         

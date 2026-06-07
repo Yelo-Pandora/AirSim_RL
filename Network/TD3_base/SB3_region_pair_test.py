@@ -376,7 +376,7 @@ def evaluate_region_pairs(
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
-        description="Evaluate Model1 TD3 by region pair cases from relative_coordinates.csv"
+        description="Evaluate TD3_base TD3 by region pair cases from relative_coordinates.csv"
     )
     parser.add_argument(
         "--model-path",

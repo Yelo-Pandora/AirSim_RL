@@ -304,7 +304,7 @@ class OccupancyAStarPlanner:
             raise RuntimeError("Occupancy grid is empty; raycast/building detection failed.")
 
         print(
-            f"[Model6] Occupancy base_grid={base_grid.width}x{base_grid.height}, "
+            f"[Astar_planner] Occupancy base_grid={base_grid.width}x{base_grid.height}, "
             f"occupied={base_grid.occupied.sum()} cells ({base_grid.occupied_ratio():.1%})"
         )
 
@@ -324,7 +324,7 @@ class OccupancyAStarPlanner:
             )
             last_cells = (start_cell, goal_cell)
             print(
-                f"[Model6] Occupancy A*: grid={grid.width}x{grid.height}, "
+                f"[Astar_planner] Occupancy A*: grid={grid.width}x{grid.height}, "
                 f"occupied={grid.occupied_ratio():.1%}, safety_margin={safety_margin:.1f}"
             )
             if start_cell is None or goal_cell is None:
@@ -345,15 +345,15 @@ class OccupancyAStarPlanner:
             try:
                 local_targets = self._extract_local_targets(base_grid, raw_points)
             except RuntimeError as exc:
-                print(f"[Model6] Reject occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                print(f"[Astar_planner] Reject occupancy path at safety_margin={safety_margin:.1f}: {exc}")
                 continue
             if len(local_targets) < 2:
-                print(f"[Model6] Reject occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
+                print(f"[Astar_planner] Reject occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
                 continue
             return self._make_plan(local_targets, cells, "occupancy")
 
         if config.OCCUPANCY_LEGACY_FALLBACK:
-            print("[Model6] Safe occupancy A* failed; retrying legacy A* without clearance penalties.")
+            print("[Astar_planner] Safe occupancy A* failed; retrying legacy A* without clearance penalties.")
             legacy_plan = self._plan_legacy(base_grid, start, goal)
             if legacy_plan is not None:
                 return legacy_plan
@@ -390,7 +390,7 @@ class OccupancyAStarPlanner:
                 )
                 last_cells = (start_cell, goal_cell)
                 print(
-                    f"[Model6] Legacy occupancy A*: grid={grid.width}x{grid.height}, "
+                    f"[Astar_planner] Legacy occupancy A*: grid={grid.width}x{grid.height}, "
                     f"occupied={grid.occupied_ratio():.1%}, safety_margin={safety_margin:.1f}"
                 )
                 if start_cell is None or goal_cell is None:
@@ -410,17 +410,17 @@ class OccupancyAStarPlanner:
                 try:
                     local_targets = self._extract_local_targets(base_grid, raw_points)
                 except RuntimeError as exc:
-                    print(f"[Model6] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                    print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: {exc}")
                     continue
                 if len(local_targets) < 2:
-                    print(f"[Model6] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
+                    print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
                     continue
-                print("[Model6] WARNING: using legacy occupancy fallback; local targets may be closer to obstacles.")
+                print("[Astar_planner] WARNING: using legacy occupancy fallback; local targets may be closer to obstacles.")
                 return self._make_plan(local_targets, cells, "occupancy_legacy")
         finally:
             self._enforce_target_clearance = previous_enforcement
 
-        print(f"[Model6] Legacy occupancy A* also failed. Last cells={last_cells}")
+        print(f"[Astar_planner] Legacy occupancy A* also failed. Last cells={last_cells}")
         return None
 
     def _bounds(self, start, goal):
@@ -460,13 +460,13 @@ class OccupancyAStarPlanner:
             topdown_grid = self._build_grid_from_topdown_map()
             if int(topdown_grid.occupied.sum()) > 0:
                 return topdown_grid
-            print("[Model6] Top-down occupancy map is empty.")
+            print("[Astar_planner] Top-down occupancy map is empty.")
 
         if config.OCCUPANCY_USE_OBJECT_BOUNDS:
             object_grid = self._build_grid_from_scene_objects(bounds)
             if int(object_grid.occupied.sum()) > 0:
                 return object_grid
-            print("[Model6] Object-bound occupancy is empty.")
+            print("[Astar_planner] Object-bound occupancy is empty.")
             if not config.OCCUPANCY_USE_LOS_FALLBACK:
                 return object_grid
 
@@ -483,7 +483,7 @@ class OccupancyAStarPlanner:
         occupied = np.load(occupancy_path)
         grid = TopDownOccupancyGrid(metadata, occupied)
         print(
-            f"[Model6] Top-down occupancy: {grid.height}x{grid.width}, "
+            f"[Astar_planner] Top-down occupancy: {grid.height}x{grid.width}, "
             f"x=[{grid.x_min:.1f}, {grid.x_max:.1f}], "
             f"y=[{grid.y_min:.1f}, {grid.y_max:.1f}], "
             f"occupied={grid.occupied.sum()} cells ({grid.occupied_ratio():.1%})"
@@ -498,7 +498,7 @@ class OccupancyAStarPlanner:
         bottom_z = config.OCCUPANCY_GROUND_Z - config.OCCUPANCY_GROUND_CLEARANCE
 
         print(
-            f"[Model6] Building occupancy grid: {grid.width}x{grid.height}, "
+            f"[Astar_planner] Building occupancy grid: {grid.width}x{grid.height}, "
             f"x=[{grid.x_min:.1f}, {grid.x_max:.1f}], y=[{grid.y_min:.1f}, {grid.y_max:.1f}], "
             f"ray_z=[{top_z:.1f} -> {bottom_z:.1f}]"
         )
@@ -506,7 +506,7 @@ class OccupancyAStarPlanner:
         count = 0
         for cell_y in range(grid.height):
             if cell_y % max(int(config.OCCUPANCY_RAY_PROGRESS_ROWS), 1) == 0 or cell_y == grid.height - 1:
-                print(f"[Model6] Occupancy raycast progress: row {cell_y + 1}/{grid.height}")
+                print(f"[Astar_planner] Occupancy raycast progress: row {cell_y + 1}/{grid.height}")
             for cell_x in range(grid.width):
                 world_x = grid.x_min + cell_x * grid.resolution
                 world_y = grid.y_min + cell_y * grid.resolution
@@ -515,12 +515,12 @@ class OccupancyAStarPlanner:
                     count += 1
 
         print(
-            f"[Model6] Raycast occupancy: {count} cells occupied "
+            f"[Astar_planner] Raycast occupancy: {count} cells occupied "
             f"({grid.occupied_ratio():.1%})"
         )
 
         if count == 0:
-            print("[Model6] Raycast occupancy is empty, fallback to scene-object occupancy.")
+            print("[Astar_planner] Raycast occupancy is empty, fallback to scene-object occupancy.")
             fallback_grid = self._build_grid_from_scene_objects(bounds)
             if int(fallback_grid.occupied.sum()) > 0:
                 return fallback_grid
@@ -534,7 +534,7 @@ class OccupancyAStarPlanner:
 
         obstacle_names = self._collect_obstacle_names()
         if not obstacle_names:
-            print("[Model6] WARNING: No scene obstacles detected for fallback occupancy.")
+            print("[Astar_planner] WARNING: No scene obstacles detected for fallback occupancy.")
             return grid
 
         marked = 0
@@ -554,7 +554,7 @@ class OccupancyAStarPlanner:
             marked += 1
 
         print(
-            f"[Model6] Object occupancy: {marked} pose/scale obstacles marked, "
+            f"[Astar_planner] Object occupancy: {marked} pose/scale obstacles marked, "
             f"{skipped} skipped, {grid.occupied.sum()} cells "
             f"({grid.occupied_ratio():.1%})"
         )
@@ -734,7 +734,7 @@ class OccupancyAStarPlanner:
             return start_cell, goal_cell
 
         print(
-            "[Model6] Endpoint nearest-free cells are disconnected; "
+            "[Astar_planner] Endpoint nearest-free cells are disconnected; "
             f"using reachable cells start={best[1]}, goal={best[2]}, "
             f"search_radius={max_radius}."
         )
@@ -996,7 +996,7 @@ class OccupancyAStarPlanner:
             if free_goal_cell is not None:
                 goal_world = grid.cell_to_world(free_goal_cell, float(goal_point[2]))
                 print(
-                    f"[Model6] WARNING: Goal is inside an obstacle! "
+                    f"[Astar_planner] WARNING: Goal is inside an obstacle! "
                     f"Moved to nearest free cell: {goal_world}"
                 )
                 if len(selected) > 1:
@@ -1011,7 +1011,7 @@ class OccupancyAStarPlanner:
                 if free_goal_cell is not None:
                     goal_world = grid.cell_to_world(free_goal_cell, float(goal_point[2]))
                     print(
-                        f"[Model6] WARNING: Goal is inside an obstacle! "
+                        f"[Astar_planner] WARNING: Goal is inside an obstacle! "
                         f"Moved to nearest free cell (extended search): {goal_world}"
                     )
                     if len(selected) > 1:
@@ -1020,7 +1020,7 @@ class OccupancyAStarPlanner:
                         selected.append(goal_world)
                 else:
                     print(
-                        f"[Model6] WARNING: Goal is inside an obstacle and no free "
+                        f"[Astar_planner] WARNING: Goal is inside an obstacle and no free "
                         f"cell found within {config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m. "
                         f"Appending goal anyway — executor will handle it."
                     )

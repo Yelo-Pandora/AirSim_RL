@@ -353,7 +353,7 @@ def capture(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Capture a top-down DepthPlanar image for Model6 map review."
+        description="Capture a top-down DepthPlanar image for Astar_planner map review."
     )
     parser.add_argument("--camera", default="TopDownFollowCamera_1")
     parser.add_argument("--output-dir", default=os.path.join(MODEL6_DIR, "topdown_depth"))

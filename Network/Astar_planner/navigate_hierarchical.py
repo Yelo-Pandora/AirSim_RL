@@ -21,7 +21,7 @@ from td3_executor import TD3SegmentExecutor
 
 def print_plan(plan):
     print(
-        f"[Model6] Upper {plan.get('planner', 'csv')} A*: {len(plan['points'])} local targets, "
+        f"[Astar_planner] Upper {plan.get('planner', 'csv')} A*: {len(plan['points'])} local targets, "
         f"path_length={plan['path_length']:.2f}"
     )
     for index, point in enumerate(plan["points"]):
@@ -37,10 +37,10 @@ def create_airsim_client():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Model6 hierarchical A* + TD3 UAV navigation.")
+    parser = argparse.ArgumentParser(description="Astar_planner hierarchical A* + TD3 UAV navigation.")
     parser.add_argument("--start", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
     parser.add_argument("--goal", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
-    parser.add_argument("--td3-model", type=str, default=None, help="Model1 TD3 checkpoint path")
+    parser.add_argument("--td3-model", type=str, default=None, help="TD3_base TD3 checkpoint path")
     parser.add_argument(
         "--planner",
         choices=["occupancy", "csv"],
@@ -104,7 +104,7 @@ def main():
         executor.close()
 
     arrived_segments = sum(1 for item in summaries if item["arrived"])
-    print(f"[Model6] Finished {arrived_segments}/{len(plan['points']) - 1} segments.")
+    print(f"[Astar_planner] Finished {arrived_segments}/{len(plan['points']) - 1} segments.")
 
 
 if __name__ == "__main__":

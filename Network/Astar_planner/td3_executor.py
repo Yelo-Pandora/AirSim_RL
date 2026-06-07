@@ -8,7 +8,7 @@ import torch
 import config
 
 
-MODEL1_DIR = os.path.join(config.NETWORK_DIR, "Model1")
+MODEL1_DIR = os.path.join(config.NETWORK_DIR, "TD3_base")
 if config.PROJECT_ROOT not in sys.path:
     sys.path.insert(0, config.PROJECT_ROOT)
 if MODEL1_DIR not in sys.path:
@@ -30,7 +30,7 @@ def resolve_model_path(model_path=None):
 
 
 class TD3SegmentExecutor:
-    """Lower action layer: use Model1 TD3 to fly from local target n to n+1."""
+    """Lower action layer: use TD3_base TD3 to fly from local target n to n+1."""
 
     def __init__(self, model_path=None):
         from reinforcement_network import AirSimUAVEnv
@@ -39,7 +39,7 @@ class TD3SegmentExecutor:
         self.env = AirSimUAVEnv()
         self.model_path = resolve_model_path(model_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[Model6] Loading TD3 lower policy: {self.model_path}")
+        print(f"[Astar_planner] Loading TD3 lower policy: {self.model_path}")
         self.model = TD3.load(self.model_path, env=self.env, device=self.device)
 
     def draw_global_path(self, points):
@@ -67,7 +67,7 @@ class TD3SegmentExecutor:
                 is_persistent=True,
             )
         except Exception as exc:
-            print(f"[Model6] Path visualization skipped: {exc}")
+            print(f"[Astar_planner] Path visualization skipped: {exc}")
 
     def execute_path(self, points):
         summaries = []
@@ -86,7 +86,7 @@ class TD3SegmentExecutor:
                 # tolerance is satisfied.  Teleporting to the waypoint would cause an
                 # unrealistic jump and the next segment would start from the wrong place.
                 start = self._get_actual_position()
-                print(f"[Model6] Segment {segment_index} starts from actual pos {start} "
+                print(f"[Astar_planner] Segment {segment_index} starts from actual pos {start} "
                       f"(planned waypoint was {points[segment_index]})")
 
             summary = self.execute_segment(
@@ -98,7 +98,7 @@ class TD3SegmentExecutor:
             )
             summaries.append(summary)
             if not summary["arrived"] and config.STOP_ON_SEGMENT_FAILURE:
-                print(f"[Model6] Stop after failed segment {segment_index}.")
+                print(f"[Astar_planner] Stop after failed segment {segment_index}.")
                 break
 
         return summaries
@@ -123,7 +123,7 @@ class TD3SegmentExecutor:
         is_final_segment=False,
         teleport_to_start=False,
     ):
-        print(f"[Model6] Segment {segment_index}: {start} -> {target}")
+        print(f"[Astar_planner] Segment {segment_index}: {start} -> {target}")
         start = np.array(start, dtype=np.float32)
         target = np.array(target, dtype=np.float32)
         if teleport_to_start:
@@ -153,7 +153,7 @@ class TD3SegmentExecutor:
             segment_reached = self._segment_reached(arrived, distance, axis_error, is_final_segment)
             if segment_reached:
                 print(
-                    f"\n[Model6] Segment {segment_index} reached in {step + 1} steps, "
+                    f"\n[Astar_planner] Segment {segment_index} reached in {step + 1} steps, "
                     f"dist={distance:.2f}, axis_error={axis_error}"
                 )
                 return {
@@ -168,7 +168,7 @@ class TD3SegmentExecutor:
 
             if terminated or truncated:
                 reason = self.env._resolve_end_reason(info, terminated=terminated, truncated=truncated)
-                print(f"\n[Model6] Segment {segment_index} ended: {reason}")
+                print(f"\n[Astar_planner] Segment {segment_index} ended: {reason}")
                 return {
                     "segment": segment_index,
                     "arrived": False,
@@ -180,7 +180,7 @@ class TD3SegmentExecutor:
                 }
 
         distance = float(last_info.get("dis2goal", np.inf))
-        print(f"\n[Model6] Segment {segment_index} timeout, dist={distance:.2f}")
+        print(f"\n[Astar_planner] Segment {segment_index} timeout, dist={distance:.2f}")
         return {
             "segment": segment_index,
             "arrived": False,
@@ -192,7 +192,7 @@ class TD3SegmentExecutor:
         }
 
     def _teleport_to_segment_start(self, start):
-        """Teleport the first Model6 segment to the planned global start."""
+        """Teleport the first Astar_planner segment to the planned global start."""
         import airsim
 
         start = np.array(start, dtype=np.float32).copy()
@@ -205,7 +205,7 @@ class TD3SegmentExecutor:
             airsim.to_quaternion(0.0, 0.0, yaw_rad),
         )
 
-        print(f"[Model6] Teleporting first segment start to {start}")
+        print(f"[Astar_planner] Teleporting first segment start to {start}")
         try:
             self.env.client.reset()
             self.env.client.enableApiControl(True, vehicle_name=self.env.vehicle_name)
@@ -226,7 +226,7 @@ class TD3SegmentExecutor:
                 vehicle_name=self.env.vehicle_name,
             ).join()
         except Exception as exc:
-            print(f"[Model6] Start teleport failed: {exc}")
+            print(f"[Astar_planner] Start teleport failed: {exc}")
         return start
 
     def _current_yaw_rad(self):
