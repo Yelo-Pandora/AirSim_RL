@@ -480,6 +480,11 @@ class OccupancyAStarPlanner:
         occupancy_path = metadata["files"]["occupancy_npy"]
         if not os.path.isabs(occupancy_path):
             occupancy_path = os.path.join(config.PROJECT_ROOT, occupancy_path)
+        if not os.path.exists(occupancy_path):
+            occupancy_path = os.path.join(
+                os.path.dirname(metadata_path),
+                os.path.basename(metadata["files"]["occupancy_npy"]),
+            )
         occupied = np.load(occupancy_path)
         grid = TopDownOccupancyGrid(metadata, occupied)
         print(
