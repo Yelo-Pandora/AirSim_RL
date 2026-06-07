@@ -71,15 +71,20 @@ class TD3SegmentExecutor:
 
     def execute_path(self, points):
         summaries = []
+        planned_points = [np.array(point, dtype=np.float32).copy() for point in points]
+        points = [point.copy() for point in planned_points]
         self.draw_global_path(points)
 
         for segment_index in range(len(points) - 1):
             target = np.array(points[segment_index + 1], dtype=np.float32)
             is_final_segment = segment_index == len(points) - 2
+            teleport_source_start = None
 
             if segment_index == 0:
-                # First segment: start from the planned waypoint
+                # First segment: place at the original planned start, climb to the
+                # requested start altitude, then start TD3 navigation.
                 start = np.array(points[segment_index], dtype=np.float32)
+                teleport_source_start = np.array(planned_points[segment_index], dtype=np.float32)
             else:
                 # Subsequent segments: use actual drone position, NOT the planned waypoint.
                 # The drone may still be 1-3m away from the waypoint when the intermediate
@@ -95,6 +100,7 @@ class TD3SegmentExecutor:
                 target,
                 is_final_segment=is_final_segment,
                 teleport_to_start=segment_index == 0,
+                teleport_source_start=teleport_source_start,
             )
             summaries.append(summary)
             if not summary["arrived"] and config.STOP_ON_SEGMENT_FAILURE:
@@ -115,6 +121,10 @@ class TD3SegmentExecutor:
                 return self.env.current_start_pos.copy()
             return np.array([0.0, 0.0, -2.0], dtype=np.float32)
 
+    @staticmethod
+    def _altitude_to_ned_z(altitude):
+        return float(config.OCCUPANCY_GROUND_Z - float(altitude))
+
     def execute_segment(
         self,
         segment_index,
@@ -122,12 +132,16 @@ class TD3SegmentExecutor:
         target,
         is_final_segment=False,
         teleport_to_start=False,
+        teleport_source_start=None,
     ):
         print(f"[Astar_planner] Segment {segment_index}: {start} -> {target}")
         start = np.array(start, dtype=np.float32)
         target = np.array(target, dtype=np.float32)
         if teleport_to_start:
-            start = self._teleport_to_segment_start(start)
+            start = self._teleport_to_segment_start(
+                start,
+                pose_start=teleport_source_start,
+            )
 
         reset_options = {
             "start_pos": start.tolist(),
@@ -191,21 +205,25 @@ class TD3SegmentExecutor:
             "axis_error": self._axis_error_to_target(target).tolist(),
         }
 
-    def _teleport_to_segment_start(self, start):
-        """Teleport the first Astar_planner segment to the planned global start."""
+    def _teleport_to_segment_start(self, start, pose_start=None):
+        """Place the first segment at the planned start, then climb before navigation."""
         import airsim
 
-        start = np.array(start, dtype=np.float32).copy()
-        if float(start[2]) >= 0.0:
-            start[2] = -10.0
+        execution_start = np.array(start, dtype=np.float32).copy()
+        pose_start = np.array(
+            execution_start if pose_start is None else pose_start,
+            dtype=np.float32,
+        ).copy()
+        if float(pose_start[2]) >= 0.0:
+            pose_start[2] = -1.0
 
         yaw_rad = self._current_yaw_rad()
         pose = airsim.Pose(
-            airsim.Vector3r(float(start[0]), float(start[1]), float(start[2])),
+            airsim.Vector3r(float(pose_start[0]), float(pose_start[1]), float(pose_start[2])),
             airsim.to_quaternion(0.0, 0.0, yaw_rad),
         )
 
-        print(f"[Astar_planner] Teleporting first segment start to {start}")
+        print(f"[Astar_planner] Placing first segment start at {pose_start}")
         try:
             self.env.client.reset()
             self.env.client.enableApiControl(True, vehicle_name=self.env.vehicle_name)
@@ -216,6 +234,8 @@ class TD3SegmentExecutor:
                 vehicle_name=self.env.vehicle_name,
             )
             time.sleep(0.5)
+            self._climb_to_start_altitude()
+            execution_start = self._get_actual_position()
             self.env.client.moveByVelocityAsync(
                 0.0,
                 0.0,
@@ -227,7 +247,29 @@ class TD3SegmentExecutor:
             ).join()
         except Exception as exc:
             print(f"[Astar_planner] Start teleport failed: {exc}")
-        return start
+        return execution_start
+
+    def _climb_to_start_altitude(self):
+        """Climb once near the global start before TD3 takes over."""
+        import airsim
+
+        target_z = self._altitude_to_ned_z(config.NAVIGATION_START_ALTITUDE)
+        try:
+            current = self._get_actual_position()
+            if float(current[2]) <= target_z:
+                return
+
+            print(f"[Astar_planner] Initial climb to {float(config.NAVIGATION_START_ALTITUDE):.1f}m.")
+            self.env.client.moveToZAsync(
+                float(target_z),
+                float(config.NAVIGATION_START_ASCENT_VELOCITY),
+                yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=0.0),
+                vehicle_name=self.env.vehicle_name,
+            ).join()
+            time.sleep(float(config.NAVIGATION_START_HOVER_SECONDS))
+            self.env.client.hoverAsync(vehicle_name=self.env.vehicle_name).join()
+        except Exception as exc:
+            print(f"[Astar_planner] Initial climb skipped: {exc}")
 
     def _current_yaw_rad(self):
         try:

@@ -161,9 +161,9 @@ class AirSimUAVEnv(gym.Env):
         # 连续到达计数，用于训练脚本按条件保存模型
         self.consecutive_arrivals = 0
         #目的地可视化开关
-        self.visualize_goal = True
+        self.visualize_goal = False
         # 飞行轨迹可视化开关
-        self.visualize_traj = True
+        self.visualize_traj = False
 
         # 显示用整体上移高度，单位：米
         # 注意：AirSim/Colosseum 的 z 轴是 NED 坐标，z 越小表示越高

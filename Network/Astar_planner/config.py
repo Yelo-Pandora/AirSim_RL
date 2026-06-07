@@ -63,6 +63,9 @@ LOCAL_TARGET_UNIFORM_TOLERANCE = 0.35
 # NED coordinates, so runtime z becomes OCCUPANCY_GROUND_Z - altitude.
 LOCAL_TARGET_RANDOMIZE_INTERMEDIATE_ALTITUDE = True
 LOCAL_TARGET_INTERMEDIATE_ALTITUDE_RANGE = (20.0, 25.0)
+NAVIGATION_START_ALTITUDE = 20.0
+NAVIGATION_START_ASCENT_VELOCITY = 3.0
+NAVIGATION_START_HOVER_SECONDS = 0.8
 
 # Fallback planner: graph A* over offline feasible navigation points.
 GRAPH_K_NEIGHBORS = 8
@@ -134,7 +137,7 @@ OBSTACLE_OBJECT_PATTERNS = (
 )
 
 # Visualization.
-VISUALIZE_GLOBAL_PATH = True
+VISUALIZE_GLOBAL_PATH = False
 VISUAL_Z_OFFSET = 20.0
 
 # Top-down depth-map capture.  Keep this at the exact center of the configured
