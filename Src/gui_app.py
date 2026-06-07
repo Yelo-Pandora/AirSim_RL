@@ -148,14 +148,14 @@ class NavGUI:
         png_path = os.path.join(
             REPO_ROOT,
             "Network",
-            "Model6",
+            "Astar_planner",
             "topdown_depth",
             "topdown_depth_20260601_165808_occupancy_h10_infl2.png",
         )
         metadata_path = os.path.join(
             REPO_ROOT,
             "Network",
-            "Model6",
+            "Astar_planner",
             "topdown_depth",
             "topdown_depth_20260601_165808_occupancy_h10_infl2.json",
         )

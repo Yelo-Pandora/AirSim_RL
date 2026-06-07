@@ -7,8 +7,8 @@ PROJECT_ROOT = os.path.dirname(NETWORK_DIR)
 
 DATASET_CSV = os.path.join(PROJECT_ROOT, "dataset", "relative_coordinates_export.csv")
 
-DEFAULT_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "checkpoints", "td3_resume_latest.zip")
-FALLBACK_TD3_MODEL = os.path.join(NETWORK_DIR, "Model1", "td3_airsim_uav_model.zip")
+DEFAULT_TD3_MODEL = os.path.join(NETWORK_DIR, "TD3_base", "checkpoints", "td3_resume_latest.zip")
+FALLBACK_TD3_MODEL = os.path.join(NETWORK_DIR, "TD3_base", "td3_airsim_uav_model.zip")
 
 # Raycast-based occupancy detection (top-down).
 # NED coordinates: z more negative = higher, z more positive = lower.
@@ -62,7 +62,7 @@ LOCAL_TARGET_UNIFORM_TOLERANCE = 0.35
 # Intermediate target cruise altitude is in meters above ground.  AirSim uses
 # NED coordinates, so runtime z becomes OCCUPANCY_GROUND_Z - altitude.
 LOCAL_TARGET_RANDOMIZE_INTERMEDIATE_ALTITUDE = True
-LOCAL_TARGET_INTERMEDIATE_ALTITUDE_RANGE = (10.0, 14.0)
+LOCAL_TARGET_INTERMEDIATE_ALTITUDE_RANGE = (20.0, 25.0)
 
 # Fallback planner: graph A* over offline feasible navigation points.
 GRAPH_K_NEIGHBORS = 8
@@ -138,7 +138,7 @@ VISUALIZE_GLOBAL_PATH = True
 VISUAL_Z_OFFSET = 20.0
 
 # Top-down depth-map capture.  Keep this at the exact center of the configured
-# occupancy bounds so expanded captures/crops stay symmetric around Model6's
+# occupancy bounds so expanded captures/crops stay symmetric around Astar_planner's
 # planning map.
 TOPDOWN_CAMERA_CENTER_X = 15.0
 TOPDOWN_CAMERA_CENTER_Y = -5.0

@@ -17,7 +17,7 @@ UE_ORIGIN_Z = 100.0
 
 def ue_world_to_airsim_ned(x, y, z):
     """
-    Convert UE world coordinates into the AirSim local NED frame used by Model1/Model6.
+    Convert UE world coordinates into the AirSim local NED frame used by TD3_base/Astar_planner.
     This dataset is stored in UE world coordinates (centimeter-scale values).
     """
     rel_x = (float(x) - UE_ORIGIN_X) / 100.0

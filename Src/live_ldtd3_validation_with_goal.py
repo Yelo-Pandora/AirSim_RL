@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Network", "Model1")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Network", "TD3_base")))
 
 import airsim
 import cv2
@@ -455,7 +455,7 @@ def draw_lidar_105_strip(lidar_105, width=720, height=140):
         x = int(idx * x_scale)
         bar_h = int((1.0 - value / MAX_DISPLAY_RANGE) * (height - 25))
         cv2.line(canvas, (x, height - 1), (x, height - 1 - bar_h), (0, 255, 0), 1)
-    cv2.putText(canvas, "LiDAR 105 ordering used by Model1", (10, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "LiDAR 105 ordering used by TD3_base", (10, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
     return canvas
 
 
@@ -736,7 +736,7 @@ def main():
     if settings_summary.get("exists"):
         lidar_cfg = settings_summary.get("lidar", {})
         print(f"LiDAR config frame={lidar_cfg.get('DataFrame')} channels={lidar_cfg.get('NumberOfChannels')} h_fov={lidar_cfg.get('HorizontalFOVStart')}..{lidar_cfg.get('HorizontalFOVEnd')}")
-        print(f"LiDAR config max distance={lidar_cfg.get('MaxDistance', 'n/a')} | Model1 empty bin={LIDAR_EMPTY_VALUE}")
+        print(f"LiDAR config max distance={lidar_cfg.get('MaxDistance', 'n/a')} | TD3_base empty bin={LIDAR_EMPTY_VALUE}")
     print("Capture mapping expectation: Scene -> responses[0], DepthPlanar -> responses[1]")
     print(f"Goal marker: {SHOW_GOAL_MARKER}, text: {SHOW_GOAL_TEXT}, default target: {DEFAULT_TARGET.tolist()}")
 
