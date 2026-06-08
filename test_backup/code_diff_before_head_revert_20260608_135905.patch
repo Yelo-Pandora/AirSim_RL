@@ -1,0 +1,1215 @@
+﻿diff --git a/Network/Astar_planner/config.py b/Network/Astar_planner/config.py
+index 3ea63d5..a2eb5c8 100644
+--- a/Network/Astar_planner/config.py
++++ b/Network/Astar_planner/config.py
+@@ -43,9 +43,9 @@ OCCUPANCY_START_GOAL_CLEAR_RADIUS = 0.0
+ OCCUPANCY_REQUIRE_NONEMPTY_MAP = True
+ OCCUPANCY_FALLBACK_LARGE_OBJECT_MIN_SIDE = 6.0
+ OCCUPANCY_ALLOW_DIAGONAL = True
+-OCCUPANCY_ASTAR_MIN_CLEARANCE = 3.0
+-OCCUPANCY_ASTAR_PREFERRED_CLEARANCE = 6.0
+-OCCUPANCY_ASTAR_CLEARANCE_COST_WEIGHT = 4.0
++OCCUPANCY_ASTAR_MIN_CLEARANCE = 5.0
++OCCUPANCY_ASTAR_PREFERRED_CLEARANCE = 8.0
++OCCUPANCY_ASTAR_CLEARANCE_COST_WEIGHT = 8.0
+ OCCUPANCY_LEGACY_FALLBACK = True
+ OCCUPANCY_RADIUS_FALLBACKS = (
+     (2.0, 1.5),
+@@ -53,10 +53,22 @@ OCCUPANCY_RADIUS_FALLBACKS = (
+     (1.0, 0.6),
+     (0.6, 0.3),
+ )
+-LOCAL_TARGET_SPACING = 40
+-LOCAL_TARGET_MIN_SPACING = 20
++LOCAL_TARGET_SPACING = 15
++LOCAL_TARGET_MIN_SPACING = 7
+ LOCAL_TARGET_KEEP_TURNS = True
+-LOCAL_TARGET_CLEARANCE = 3.0
++LOCAL_TARGET_CLEARANCE = 6.0
++LOCAL_TARGET_CORRIDOR_CLEARANCE = 0.0
++LOCAL_TARGET_CORRIDOR_SAMPLE_STEP = 1.0
++LOCAL_TARGET_CENTERING_RADIUS = 6.0
++LOCAL_TARGET_CENTERING_PATH_DEVIATION_WEIGHT = 0.25
++LOCAL_TARGET_SAFETY_PROFILES = (
++    # Values include any pre-inflation already baked into the top-down map.
++    # Keep waypoints away from walls; keep corridor as LOS-only for feasibility.
++    (6.0, 0.0),
++    (5.0, 0.0),
++    (4.0, 0.0),
++    (3.5, 0.0),
++)
+ LOCAL_TARGET_UNIFORM_RESAMPLE = True
+ LOCAL_TARGET_UNIFORM_TOLERANCE = 0.35
+ # Intermediate target cruise altitude is in meters above ground.  AirSim uses
+@@ -87,6 +99,50 @@ INTERMEDIATE_AXIS_TOLERANCE = 3.0
+ FINAL_AXIS_TOLERANCE = 1.5
+ STOP_ON_SEGMENT_FAILURE = True
+ DETERMINISTIC_POLICY = True
++INTERMEDIATE_STUCK_ACCEPT_DISTANCE = 10.0
++INTERMEDIATE_STUCK_PROGRESS_EPS = 0.12
++INTERMEDIATE_STUCK_SPEED_MAX = 1.0
++INTERMEDIATE_STUCK_WINDOW = 12
++INTERMEDIATE_ADVANCE_ACCEPT_DISTANCE = 10.0
++INTERMEDIATE_ADVANCE_PROGRESS_RATIO = 0.70
++INTERMEDIATE_ADVANCE_MIN_PROGRESS = 3.0
++INTERMEDIATE_STALL_MIN_STEPS = 60
++INTERMEDIATE_STALL_WINDOW = 18
++INTERMEDIATE_STALL_PROGRESS_EPS = 0.06
++INTERMEDIATE_STALL_SPEED_MAX = 1.0
++SEGMENT_SHIELD_STEP_EXTENSION = 1
++SEGMENT_SHIELD_MAX_EXTRA_STEPS = 60
++
++# Runtime safety shield for test-time lower-policy execution.
++SAFETY_SHIELD_ENABLED = True
++SAFETY_SHIELD_FRONT_WARN_DIST = 4.0
++SAFETY_SHIELD_FRONT_STOP_DIST = 2.2
++SAFETY_SHIELD_ANY_STOP_DIST = 1.4
++SAFETY_SHIELD_DEPTH_WARN_DIST = 4.0
++SAFETY_SHIELD_DEPTH_STOP_DIST = 2.0
++SAFETY_SHIELD_MIN_BOTTOM_DIST = 2.5
++SAFETY_SHIELD_MIN_TOP_DIST = 2.5
++SAFETY_SHIELD_EMERGENCY_BOTTOM_DIST = 1.0
++SAFETY_SHIELD_EMERGENCY_TOP_DIST = 1.0
++SAFETY_SHIELD_CLIMB_ACTION_Z = -0.6
++SAFETY_SHIELD_DESCEND_ACTION_Z = 0.5
++SAFETY_SHIELD_BRAKE_GAIN = 0.75
++SAFETY_SHIELD_WARN_BLEND = 0.35
++SAFETY_SHIELD_LOG_EVENTS = True
++SAFETY_SHIELD_RECOVERY_ENABLED = True
++SAFETY_SHIELD_RECOVERY_STEPS = 6
++SAFETY_SHIELD_RECOVERY_BRAKE_STEPS = 2
++SAFETY_SHIELD_RECOVERY_LATERAL_ACTION = 0.65
++SAFETY_SHIELD_RECOVERY_BACK_ACTION = 0.55
++SAFETY_SHIELD_RECOVERY_GOAL_ACTION = 0.25
++SAFETY_SHIELD_RECOVERY_CLIMB_ACTION = -0.35
++SAFETY_SHIELD_RECOVERY_FRONT_CLEAR_DIST = 4.5
++SAFETY_SHIELD_RECOVERY_TRIGGER_REASONS = (
++    "emergency_lidar_any",
++    "emergency_lidar_front",
++    "emergency_depth_front",
++    "warn_front",
++)
+ 
+ # AirSim waypoint safety validation for upper graph nodes.
+ VALIDATE_WAYPOINTS_WITH_AIRSIM = False
+diff --git a/Network/Astar_planner/navigate_hierarchical.py b/Network/Astar_planner/navigate_hierarchical.py
+index bfa8bad..1a9429b 100644
+--- a/Network/Astar_planner/navigate_hierarchical.py
++++ b/Network/Astar_planner/navigate_hierarchical.py
+@@ -53,8 +53,16 @@ def main():
+         action="store_true",
+         help="Connect to AirSim and filter local targets using segmentation obstacle poses",
+     )
++    parser.add_argument(
++        "--no-safety-shield",
++        action="store_true",
++        help="Disable test-time lower-policy safety shield.",
++    )
+     args = parser.parse_args()
+ 
++    if args.no_safety_shield:
++        config.SAFETY_SHIELD_ENABLED = False
++
+     start = np.array(args.start, dtype=np.float32)
+     goal = np.array(args.goal, dtype=np.float32)
+ 
+diff --git a/Network/Astar_planner/occupancy_planner.py b/Network/Astar_planner/occupancy_planner.py
+index 78742fe..d1fbca5 100644
+--- a/Network/Astar_planner/occupancy_planner.py
++++ b/Network/Astar_planner/occupancy_planner.py
+@@ -7,6 +7,11 @@ import numpy as np
+ 
+ import config
+ 
++try:
++    from scipy.ndimage import distance_transform_edt
++except Exception:
++    distance_transform_edt = None
++
+ 
+ def _matches_any(name, patterns):
+     lower = name.lower()
+@@ -286,6 +291,8 @@ class OccupancyAStarPlanner:
+     def __init__(self, client):
+         self.client = client
+         self._enforce_target_clearance = True
++        self._target_clearance_override = None
++        self._corridor_clearance_override = None
+ 
+     def plan(self, start, goal):
+         start = np.asarray(start, dtype=np.float32)
+@@ -341,9 +348,12 @@ class OccupancyAStarPlanner:
+                 goal,
+                 keep_original_endpoints=False,
+             )
+-            # Use base_grid (intact buildings, no clear_disc) for all LOS / occupied checks.
+             try:
+-                local_targets = self._extract_local_targets(base_grid, raw_points)
++                local_targets = self._extract_local_targets_with_safety_profiles(
++                    base_grid,
++                    raw_points,
++                    planner_label=f"occupancy safety_margin={safety_margin:.1f}",
++                )
+             except RuntimeError as exc:
+                 print(f"[Astar_planner] Reject occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                 continue
+@@ -353,7 +363,7 @@ class OccupancyAStarPlanner:
+             return self._make_plan(local_targets, cells, "occupancy")
+ 
+         if config.OCCUPANCY_LEGACY_FALLBACK:
+-            print("[Astar_planner] Safe occupancy A* failed; retrying legacy A* without clearance penalties.")
++            print("[Astar_planner] Safe occupancy A* failed; retrying legacy A* with local-target clearance profiles.")
+             legacy_plan = self._plan_legacy(base_grid, start, goal)
+             if legacy_plan is not None:
+                 return legacy_plan
+@@ -375,7 +385,7 @@ class OccupancyAStarPlanner:
+     def _plan_legacy(self, base_grid, start, goal):
+         last_cells = None
+         previous_enforcement = self._enforce_target_clearance
+-        self._enforce_target_clearance = False
++        self._enforce_target_clearance = True
+         try:
+             for _, safety_margin in config.OCCUPANCY_RADIUS_FALLBACKS:
+                 grid = self._inflate_grid(base_grid, safety_margin)
+@@ -408,14 +418,18 @@ class OccupancyAStarPlanner:
+                     keep_original_endpoints=False,
+                 )
+                 try:
+-                    local_targets = self._extract_local_targets(base_grid, raw_points)
++                    local_targets = self._extract_local_targets_with_safety_profiles(
++                        base_grid,
++                        raw_points,
++                        planner_label=f"legacy safety_margin={safety_margin:.1f}",
++                    )
+                 except RuntimeError as exc:
+                     print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: {exc}")
+                     continue
+                 if len(local_targets) < 2:
+                     print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
+                     continue
+-                print("[Astar_planner] WARNING: using legacy occupancy fallback; local targets may be closer to obstacles.")
++                print("[Astar_planner] WARNING: using legacy occupancy fallback with strict local-target clearance.")
+                 return self._make_plan(local_targets, cells, "occupancy_legacy")
+         finally:
+             self._enforce_target_clearance = previous_enforcement
+@@ -792,6 +806,13 @@ class OccupancyAStarPlanner:
+         if preferred_clearance <= 0.0 or preferred_clearance <= min_clearance:
+             return None
+ 
++        if distance_transform_edt is not None:
++            return self._build_clearance_cost_fast(
++                grid,
++                min_clearance,
++                preferred_clearance,
++            )
++
+         radius_cells = int(math.ceil(preferred_clearance / grid.resolution))
+         cost = np.zeros(grid.occupied.shape, dtype=np.float32)
+         occupied_axis0, occupied_axis1 = np.where(grid.occupied)
+@@ -815,6 +836,30 @@ class OccupancyAStarPlanner:
+                         self._set_cell_cost(grid, cost, near_cell, max(old_cost, float(penalty)))
+         return cost
+ 
++    @staticmethod
++    def _build_clearance_cost_fast(grid, min_clearance, preferred_clearance):
++        distances = OccupancyAStarPlanner._build_clearance_distance_map(grid)
++        cost = np.zeros(grid.occupied.shape, dtype=np.float32)
++        free_mask = ~grid.occupied
++
++        blocked = free_mask & (distances < float(min_clearance))
++        warned = (
++            free_mask
++            & (distances >= float(min_clearance))
++            & (distances <= float(preferred_clearance))
++        )
++
++        cost[blocked] = np.inf
++        denom = max(float(preferred_clearance) - float(min_clearance), 1e-6)
++        cost[warned] = (float(preferred_clearance) - distances[warned]) / denom
++        return cost
++
++    @staticmethod
++    def _build_clearance_distance_map(grid):
++        if distance_transform_edt is None:
++            return None
++        return distance_transform_edt(~grid.occupied) * float(grid.resolution)
++
+     @staticmethod
+     def _cell_cost(grid, cost, cell):
+         if isinstance(grid, TopDownOccupancyGrid):
+@@ -828,6 +873,96 @@ class OccupancyAStarPlanner:
+         else:
+             cost[cell[1], cell[0]] = value
+ 
++    @staticmethod
++    def _cell_clearance(grid, clearance_distances, cell):
++        if clearance_distances is None:
++            return 0.0
++        if not grid.in_bounds(cell):
++            return 0.0
++        if isinstance(grid, TopDownOccupancyGrid):
++            return float(clearance_distances[cell[0], cell[1]])
++        return float(clearance_distances[cell[1], cell[0]])
++
++    def _center_local_target(self, grid, point, last_selected, clearance_distances=None):
++        if clearance_distances is None:
++            return point
++
++        center_cell = grid.world_to_cell(point)
++        if not grid.in_bounds(center_cell):
++            return point
++
++        radius = float(getattr(config, "LOCAL_TARGET_CENTERING_RADIUS", 0.0))
++        if radius <= 0.0:
++            return point
++
++        radius_cells = max(int(math.ceil(radius / grid.resolution)), 1)
++        best = None
++        best_score = -float("inf")
++        for d0 in range(-radius_cells, radius_cells + 1):
++            for d1 in range(-radius_cells, radius_cells + 1):
++                deviation = math.hypot(d0, d1) * grid.resolution
++                if deviation > radius:
++                    continue
++                candidate_cell = (center_cell[0] + d0, center_cell[1] + d1)
++                if not grid.in_bounds(candidate_cell) or not grid.is_free(candidate_cell):
++                    continue
++
++                candidate = grid.cell_to_world(candidate_cell, float(point[2]))
++                if not self._has_target_clearance(
++                    grid,
++                    candidate,
++                    clearance_distances=clearance_distances,
++                ):
++                    continue
++
++                clearance = self._cell_clearance(grid, clearance_distances, candidate_cell)
++                score = (
++                    clearance
++                    - float(config.LOCAL_TARGET_CENTERING_PATH_DEVIATION_WEIGHT) * deviation
++                )
++                if score > best_score:
++                    best_score = score
++                    best = candidate
++
++        return point if best is None else best
++
++    def _is_corridor_clear(self, grid, point_a, point_b, clearance=None, clearance_distances=None):
++        if not grid.is_line_clear(point_a, point_b):
++            return False
++
++        if clearance is None:
++            clearance = self._active_corridor_clearance()
++        raw_clearance = float(clearance)
++        effective_clearance = self._effective_target_clearance(grid, raw_clearance)
++        if effective_clearance <= 0.0:
++            return True
++
++        xy_a = np.asarray(point_a[:2], dtype=np.float32)
++        xy_b = np.asarray(point_b[:2], dtype=np.float32)
++        distance = float(np.linalg.norm(xy_b - xy_a))
++        sample_step = max(float(getattr(config, "LOCAL_TARGET_CORRIDOR_SAMPLE_STEP", 1.0)), 1e-3)
++        sample_count = max(int(math.ceil(distance / sample_step)), 1)
++        z_a = float(point_a[2])
++        z_b = float(point_b[2])
++        for index in range(sample_count + 1):
++            ratio = index / float(sample_count)
++            sample = np.array(
++                [
++                    xy_a[0] + (xy_b[0] - xy_a[0]) * ratio,
++                    xy_a[1] + (xy_b[1] - xy_a[1]) * ratio,
++                    z_a + (z_b - z_a) * ratio,
++                ],
++                dtype=np.float32,
++            )
++            if not self._has_target_clearance(
++                grid,
++                sample,
++                clearance=raw_clearance,
++                clearance_distances=clearance_distances,
++            ):
++                return False
++        return True
++
+     def _astar(self, grid, start, goal, clearance_cost=None):
+         if not grid.is_free(start) or not grid.is_free(goal):
+             return None
+@@ -893,6 +1028,42 @@ class OccupancyAStarPlanner:
+             points[-1] = goal
+         return points
+ 
++    def _extract_local_targets_with_safety_profiles(self, grid, raw_points, planner_label="occupancy"):
++        profiles = tuple(getattr(config, "LOCAL_TARGET_SAFETY_PROFILES", ()))
++        if not profiles:
++            profiles = ((config.LOCAL_TARGET_CLEARANCE, config.LOCAL_TARGET_CORRIDOR_CLEARANCE),)
++
++        last_error = None
++        previous_target = self._target_clearance_override
++        previous_corridor = self._corridor_clearance_override
++        try:
++            for target_clearance, corridor_clearance in profiles:
++                self._target_clearance_override = float(target_clearance)
++                self._corridor_clearance_override = float(corridor_clearance)
++                try:
++                    local_targets = self._extract_local_targets(grid, raw_points)
++                except RuntimeError as exc:
++                    last_error = exc
++                    print(
++                        f"[Astar_planner] Reject {planner_label} local-target profile "
++                        f"target={target_clearance:.1f}, corridor={corridor_clearance:.1f}: {exc}"
++                    )
++                    continue
++                if len(local_targets) >= 2:
++                    print(
++                        f"[Astar_planner] Local-target safety profile selected: "
++                        f"target={target_clearance:.1f}, corridor={corridor_clearance:.1f}"
++                    )
++                    return local_targets
++                last_error = RuntimeError("insufficient local targets")
++        finally:
++            self._target_clearance_override = previous_target
++            self._corridor_clearance_override = previous_corridor
++
++        if last_error is not None:
++            raise RuntimeError(str(last_error))
++        raise RuntimeError("No local-target safety profile succeeded.")
++
+     def _extract_local_targets(self, grid, raw_points):
+         """Extract sparse local targets from the dense A* path.
+ 
+@@ -914,6 +1085,7 @@ class OccupancyAStarPlanner:
+         selected = [raw_points[0]]
+         last_selected = raw_points[0]
+         previous_direction = None
++        clearance_distances = self._build_clearance_distance_map(grid)
+ 
+         for index in range(1, len(raw_points) - 1):
+             current = raw_points[index]
+@@ -956,6 +1128,7 @@ class OccupancyAStarPlanner:
+                     index,
+                     last_selected,
+                     min_distance=config.LOCAL_TARGET_MIN_SPACING,
++                    clearance_distances=clearance_distances,
+                 )
+                 if safe_current is not None:
+                     selected.append(safe_current)
+@@ -965,22 +1138,34 @@ class OccupancyAStarPlanner:
+                     backtrack_found = False
+                     for k in range(index - 1, 0, -1):
+                         bt = raw_points[k]
++                        bt = self._center_local_target(
++                            grid,
++                            bt,
++                            last_selected,
++                            clearance_distances=clearance_distances,
++                        )
+                         bt_cell = grid.world_to_cell(bt)
+                         if (
+                             grid.is_free(bt_cell)
+-                            and self._has_target_clearance(grid, bt)
+-                            and grid.is_line_clear(last_selected, bt)
++                            and self._has_target_clearance(grid, bt, clearance_distances=clearance_distances)
++                            and self._is_corridor_clear(grid, last_selected, bt, clearance_distances=clearance_distances)
+                         ):
+                             selected.append(bt)
+                             last_selected = bt
+                             backtrack_found = True
+                             break
+                     # Only append current if it's free AND reachable from last_selected.
++                    current = self._center_local_target(
++                        grid,
++                        current,
++                        last_selected,
++                        clearance_distances=clearance_distances,
++                    )
+                     cur_cell = grid.world_to_cell(current)
+                     if (
+                         grid.is_free(cur_cell)
+-                        and self._has_target_clearance(grid, current)
+-                        and grid.is_line_clear(last_selected, current)
++                        and self._has_target_clearance(grid, current, clearance_distances=clearance_distances)
++                        and self._is_corridor_clear(grid, last_selected, current, clearance_distances=clearance_distances)
+                     ):
+                         selected.append(current)
+                         last_selected = current
+@@ -1033,14 +1218,15 @@ class OccupancyAStarPlanner:
+                         f"Goal remains inside an obstacle and no free cell was found within "
+                         f"{config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m."
+                     )
+-        elif not grid.is_line_clear(selected[-1], goal_point):
+-            self._append_blocked_tail(grid, selected, raw_points)
++        elif not self._is_goal_tail_clear(grid, selected[-1], goal_point, clearance_distances=clearance_distances):
++            self._append_blocked_tail(grid, selected, raw_points, clearance_distances=clearance_distances)
+         elif float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
+             selected[-1] = goal_point
+         else:
+             selected.append(goal_point)
+ 
+         selected = self._uniform_resample_local_targets(grid, raw_points, selected)
++        self._log_local_target_clearance(grid, selected, clearance_distances)
+         return selected
+ 
+     def _uniform_resample_local_targets(self, grid, raw_points, fallback_targets):
+@@ -1063,6 +1249,7 @@ class OccupancyAStarPlanner:
+ 
+         sampled = [raw_points[0]]
+         last_selected = sampled[0]
++        clearance_distances = self._build_clearance_distance_map(grid)
+         for sample_index in range(1, segment_count):
+             desired_distance = target_spacing * sample_index
+             preferred_index = self._nearest_path_index_at_distance(distances, desired_distance)
+@@ -1072,6 +1259,7 @@ class OccupancyAStarPlanner:
+                 preferred_index,
+                 last_selected,
+                 min_distance=config.LOCAL_TARGET_MIN_SPACING,
++                clearance_distances=clearance_distances,
+             )
+             if candidate is None:
+                 return fallback_targets
+@@ -1079,7 +1267,7 @@ class OccupancyAStarPlanner:
+             last_selected = candidate
+ 
+         goal_point = fallback_targets[-1]
+-        if not grid.is_line_clear(sampled[-1], goal_point):
++        if not self._is_corridor_clear(grid, sampled[-1], goal_point, clearance_distances=clearance_distances):
+             return fallback_targets
+         if float(np.linalg.norm(goal_point - sampled[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(sampled) > 1:
+             sampled[-1] = goal_point
+@@ -1130,6 +1318,23 @@ class OccupancyAStarPlanner:
+             return float("inf")
+         return float(np.std(distances) / mean_distance)
+ 
++    def _log_local_target_clearance(self, grid, points, clearance_distances=None):
++        if clearance_distances is None or len(points) <= 2:
++            return
++        middle_points = points[1:-1]
++        clearances = [
++            self._cell_clearance(grid, clearance_distances, grid.world_to_cell(point))
++            for point in middle_points
++        ]
++        if not clearances:
++            return
++        print(
++            f"[Astar_planner] Local target clearance: "
++            f"min={min(clearances):.1f}m, mean={float(np.mean(clearances)):.1f}m, "
++            f"target_req={self._effective_target_clearance(grid, self._active_target_clearance()):.1f}m, "
++            f"corridor_req={self._effective_target_clearance(grid, self._active_corridor_clearance()):.1f}m"
++        )
++
+     def _append_reachable_target_or_bridge(self, grid, selected, raw_points, last_selected, current, index):
+         backtrack_found = False
+         for k in range(index - 1, 0, -1):
+@@ -1146,15 +1351,17 @@ class OccupancyAStarPlanner:
+         elif not backtrack_found:
+             pass
+ 
+-    def _has_target_clearance(self, grid, point, clearance=None):
++    def _has_target_clearance(self, grid, point, clearance=None, clearance_distances=None):
+         if clearance is None:
+-            clearance = config.LOCAL_TARGET_CLEARANCE
++            clearance = self._active_target_clearance()
+         clearance = self._effective_target_clearance(grid, clearance)
+         cell = grid.world_to_cell(point)
+         if not grid.is_free(cell):
+             return False
+         if clearance <= 0.0:
+             return True
++        if clearance_distances is not None:
++            return self._cell_clearance(grid, clearance_distances, cell) >= float(clearance)
+ 
+         radius_cells = int(math.ceil(clearance / grid.resolution))
+         for d0 in range(-radius_cells, radius_cells + 1):
+@@ -1166,6 +1373,19 @@ class OccupancyAStarPlanner:
+                     return False
+         return True
+ 
++    def _is_goal_tail_clear(self, grid, point_a, goal_point, clearance_distances=None):
++        if self._is_corridor_clear(
++            grid,
++            point_a,
++            goal_point,
++            clearance_distances=clearance_distances,
++        ):
++            return True
++        # Dataset endpoints are sometimes close to building facades.  Keep the
++        # middle local targets safe, but allow the final approach to degrade to
++        # plain LOS so planning does not fail solely because the goal is narrow.
++        return grid.is_line_clear(point_a, goal_point)
++
+     @staticmethod
+     def _effective_target_clearance(grid, clearance):
+         clearance = float(clearance)
+@@ -1174,9 +1394,21 @@ class OccupancyAStarPlanner:
+         inflated = float(grid.metadata.get("inflate_meters", 0.0))
+         return max(0.0, clearance - inflated)
+ 
+-    def _safe_target_near_index(self, grid, raw_points, preferred_index, last_selected, min_distance=0.0):
++    def _active_target_clearance(self):
++        if self._target_clearance_override is not None:
++            return float(self._target_clearance_override)
++        return float(config.LOCAL_TARGET_CLEARANCE)
++
++    def _active_corridor_clearance(self):
++        if self._corridor_clearance_override is not None:
++            return float(self._corridor_clearance_override)
++        return float(getattr(config, "LOCAL_TARGET_CORRIDOR_CLEARANCE", config.LOCAL_TARGET_CLEARANCE))
++
++    def _safe_target_near_index(self, grid, raw_points, preferred_index, last_selected, min_distance=0.0, clearance_distances=None):
+         max_offset = max(int(math.ceil(config.LOCAL_TARGET_SPACING / grid.resolution)), 1)
+         last_raw_index = len(raw_points) - 2
++        best = None
++        best_score = -float("inf")
+         for offset in range(0, max_offset + 1):
+             candidate_indices = [preferred_index] if offset == 0 else [
+                 preferred_index - offset,
+@@ -1186,18 +1418,37 @@ class OccupancyAStarPlanner:
+                 if candidate_index < 1 or candidate_index > last_raw_index:
+                     continue
+                 candidate = raw_points[candidate_index]
++                candidate = self._center_local_target(
++                    grid,
++                    candidate,
++                    last_selected,
++                    clearance_distances=clearance_distances,
++                )
+                 if float(np.linalg.norm(candidate - last_selected)) < float(min_distance):
+                     continue
+-                if not self._has_target_clearance(grid, candidate):
++                if not self._has_target_clearance(grid, candidate, clearance_distances=clearance_distances):
+                     continue
+-                if grid.is_line_clear(last_selected, candidate):
+-                    return candidate
+-        return None
++                if not self._is_corridor_clear(grid, last_selected, candidate, clearance_distances=clearance_distances):
++                    continue
++
++                candidate_cell = grid.world_to_cell(candidate)
++                clearance_score = self._cell_clearance(grid, clearance_distances, candidate_cell)
++                path_deviation = float(np.linalg.norm(candidate[:2] - raw_points[candidate_index][:2]))
++                index_penalty = 0.05 * abs(candidate_index - preferred_index)
++                score = (
++                    clearance_score
++                    - float(config.LOCAL_TARGET_CENTERING_PATH_DEVIATION_WEIGHT) * path_deviation
++                    - index_penalty
++                )
++                if score > best_score:
++                    best_score = score
++                    best = candidate
++        return best
+ 
+-    def _append_blocked_tail(self, grid, selected, raw_points):
++    def _append_blocked_tail(self, grid, selected, raw_points, clearance_distances=None):
+         goal_point = raw_points[-1]
+         guard = 0
+-        while not grid.is_line_clear(selected[-1], goal_point):
++        while not self._is_goal_tail_clear(grid, selected[-1], goal_point, clearance_distances=clearance_distances):
+             guard += 1
+             if guard > len(raw_points):
+                 raise RuntimeError(
+@@ -1208,17 +1459,27 @@ class OccupancyAStarPlanner:
+             bridge = None
+             last_cell = grid.world_to_cell(selected[-1])
+             for index in range(len(raw_points) - 2, 0, -1):
+-                candidate = raw_points[index]
++                raw_candidate = raw_points[index]
++                raw_candidate_cell = grid.world_to_cell(raw_candidate)
++                if raw_candidate_cell == last_cell:
++                    break
++                candidate = raw_candidate
++                candidate = self._center_local_target(
++                    grid,
++                    candidate,
++                    selected[-1],
++                    clearance_distances=clearance_distances,
++                )
+                 candidate_cell = grid.world_to_cell(candidate)
+                 if candidate_cell == last_cell:
+-                    break
++                    continue
+                 if (
+                     grid.is_free(candidate_cell)
+                     and (
+                         not self._enforce_target_clearance
+-                        or self._has_target_clearance(grid, candidate)
++                        or self._has_target_clearance(grid, candidate, clearance_distances=clearance_distances)
+                     )
+-                    and grid.is_line_clear(selected[-1], candidate)
++                    and self._is_corridor_clear(grid, selected[-1], candidate, clearance_distances=clearance_distances)
+                 ):
+                     bridge = candidate
+                     break
+diff --git a/Network/Astar_planner/td3_executor.py b/Network/Astar_planner/td3_executor.py
+index b6632d3..a03f8ab 100644
+--- a/Network/Astar_planner/td3_executor.py
++++ b/Network/Astar_planner/td3_executor.py
+@@ -6,6 +6,7 @@ import numpy as np
+ import torch
+ 
+ import config
++from safety_shield import RuntimeSafetyShield
+ 
+ 
+ MODEL1_DIR = os.path.join(config.NETWORK_DIR, "TD3_base")
+@@ -41,6 +42,11 @@ class TD3SegmentExecutor:
+         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+         print(f"[Astar_planner] Loading TD3 lower policy: {self.model_path}")
+         self.model = TD3.load(self.model_path, env=self.env, device=self.device)
++        self.safety_shield = (
++            RuntimeSafetyShield(self.env)
++            if bool(getattr(config, "SAFETY_SHIELD_ENABLED", False))
++            else None
++        )
+ 
+     def draw_global_path(self, points):
+         if not config.VISUALIZE_GLOBAL_PATH:
+@@ -147,37 +153,104 @@ class TD3SegmentExecutor:
+             "start_pos": start.tolist(),
+             "target": target.tolist(),
+             "region": f"model6_segment_{segment_index}",
++            "reward_mode": "hierarchical_test",
++            "disable_crossed_border_termination": True,
+         }
+         if teleport_to_start:
+             reset_options["skip_stabilization"] = True
+ 
+         obs, _ = self.env.reset(options=reset_options)
++        if self.safety_shield is not None:
++            self.safety_shield.reset()
++
++        initial_segment_distance = float(
++            getattr(
++                self.env,
++                "start_dist",
++                np.linalg.norm(target - start),
++            )
++        )
++        if not np.isfinite(initial_segment_distance) or initial_segment_distance <= 1e-6:
++            initial_segment_distance = float(np.linalg.norm(target - start))
+ 
+         total_reward = 0.0
+         last_info = {}
+-        for step in range(config.SEGMENT_MAX_STEPS):
++        stuck_near_target_steps = 0
++        stalled_progress_steps = 0
++        step = 0
++        while step < self._segment_step_budget():
++            step += 1
+             action, _ = self.model.predict(obs, deterministic=config.DETERMINISTIC_POLICY)
++            if self.safety_shield is not None:
++                action, shield_diag = self.safety_shield.filter_action(action, obs)
+             obs, reward, terminated, truncated, info = self.env.step(action)
++            if self.safety_shield is not None:
++                info["safety_shield_reason"] = self.safety_shield.last_reason
++                info["safety_shield_interventions"] = self.safety_shield.interventions
++                info["safety_shield_recovery_interventions"] = self.safety_shield.recovery_interventions
++                info["safety_shield_recovery_steps"] = self.safety_shield.recovery_steps
+             total_reward += float(reward)
+             last_info = info
+ 
+             arrived = bool(info.get("arrived", False))
+             distance = float(info.get("dis2goal", np.inf))
+             axis_error = self._axis_error_to_target(target)
++            progress = float(info.get("progress", 0.0))
++            speed = float(info.get("v_magnitude", np.inf))
++            stuck_near_target_steps = self._update_stuck_near_target_steps(
++                stuck_near_target_steps,
++                distance,
++                progress,
++                speed,
++                is_final_segment,
++            )
++            stalled_progress_steps = self._update_intermediate_stall_steps(
++                stalled_progress_steps,
++                progress,
++                speed,
++                step,
++                is_final_segment,
++            )
+             segment_reached = self._segment_reached(arrived, distance, axis_error, is_final_segment)
++            if (
++                not segment_reached
++                and stuck_near_target_steps >= config.INTERMEDIATE_STUCK_WINDOW
++                and self._intermediate_has_enough_progress(
++                    distance,
++                    initial_segment_distance,
++                    is_final_segment,
++                )
++            ):
++                segment_reached = True
++                info["end_reason"] = "stuck_near_intermediate"
++            if not segment_reached:
++                advance_reason = self._intermediate_progress_advance_reason(
++                    distance,
++                    initial_segment_distance,
++                    stalled_progress_steps,
++                    is_final_segment,
++                    timed_out=False,
++                )
++                if advance_reason is not None:
++                    segment_reached = True
++                    info["end_reason"] = advance_reason
+             if segment_reached:
+                 print(
+-                    f"\n[Astar_planner] Segment {segment_index} reached in {step + 1} steps, "
+-                    f"dist={distance:.2f}, axis_error={axis_error}"
++                    f"\n[Astar_planner] Segment {segment_index} reached in {step} steps, "
++                    f"dist={distance:.2f}, axis_error={axis_error}, reason={info.get('end_reason', 'arrived')}"
+                 )
+                 return {
+                     "segment": segment_index,
+                     "arrived": True,
+-                    "steps": step + 1,
++                    "steps": step,
+                     "reward": total_reward,
+-                    "end_reason": "arrived",
++                    "end_reason": info.get("end_reason", "arrived"),
+                     "distance": distance,
+                     "axis_error": axis_error.tolist(),
++                    "safety_shield_interventions": self._shield_interventions(),
++                    "safety_shield_emergency_interventions": self._shield_emergencies(),
++                    "safety_shield_recovery_interventions": self._shield_recoveries(),
++                    "safety_shield_recovery_steps": self._shield_recovery_steps(),
+                 }
+ 
+             if terminated or truncated:
+@@ -186,25 +259,100 @@ class TD3SegmentExecutor:
+                 return {
+                     "segment": segment_index,
+                     "arrived": False,
+-                    "steps": step + 1,
++                    "steps": step,
+                     "reward": total_reward,
+                     "end_reason": reason,
+                     "distance": distance,
+                     "axis_error": axis_error.tolist(),
++                    "safety_shield_interventions": self._shield_interventions(),
++                    "safety_shield_emergency_interventions": self._shield_emergencies(),
++                    "safety_shield_recovery_interventions": self._shield_recoveries(),
++                    "safety_shield_recovery_steps": self._shield_recovery_steps(),
+                 }
+ 
+         distance = float(last_info.get("dis2goal", np.inf))
+-        print(f"\n[Astar_planner] Segment {segment_index} timeout, dist={distance:.2f}")
++        axis_error = self._axis_error_to_target(target)
++        advance_reason = self._intermediate_progress_advance_reason(
++            distance,
++            initial_segment_distance,
++            stalled_progress_steps,
++            is_final_segment,
++            timed_out=True,
++        )
++        if advance_reason is not None:
++            print(
++                f"\n[Astar_planner] Segment {segment_index} advanced after timeout "
++                f"in {step} steps, dist={distance:.2f}, axis_error={axis_error}, "
++                f"reason={advance_reason}"
++            )
++            return {
++                "segment": segment_index,
++                "arrived": True,
++                "steps": step,
++                "reward": total_reward,
++                "end_reason": advance_reason,
++                "distance": distance,
++                "axis_error": axis_error.tolist(),
++                "safety_shield_interventions": self._shield_interventions(),
++                "safety_shield_emergency_interventions": self._shield_emergencies(),
++                "safety_shield_recovery_interventions": self._shield_recoveries(),
++                "safety_shield_recovery_steps": self._shield_recovery_steps(),
++            }
++
++        print(
++            f"\n[Astar_planner] Segment {segment_index} timeout, "
++            f"dist={distance:.2f}, budget={step}"
++        )
+         return {
+             "segment": segment_index,
+             "arrived": False,
+-            "steps": config.SEGMENT_MAX_STEPS,
++            "steps": step,
+             "reward": total_reward,
+             "end_reason": "segment_timeout",
+             "distance": distance,
+-            "axis_error": self._axis_error_to_target(target).tolist(),
++            "axis_error": axis_error.tolist(),
++            "safety_shield_interventions": self._shield_interventions(),
++            "safety_shield_emergency_interventions": self._shield_emergencies(),
++            "safety_shield_recovery_interventions": self._shield_recoveries(),
++            "safety_shield_recovery_steps": self._shield_recovery_steps(),
+         }
+ 
++    def _segment_step_budget(self):
++        base_steps = int(config.SEGMENT_MAX_STEPS)
++        if self.safety_shield is None:
++            return base_steps
++
++        step_extension = int(getattr(config, "SEGMENT_SHIELD_STEP_EXTENSION", 0))
++        max_extra_steps = int(getattr(config, "SEGMENT_SHIELD_MAX_EXTRA_STEPS", 0))
++        if step_extension <= 0 or max_extra_steps <= 0:
++            return base_steps
++
++        extra_steps = min(
++            max_extra_steps,
++            self._shield_recovery_steps() * step_extension,
++        )
++        return base_steps + int(extra_steps)
++
++    def _shield_interventions(self):
++        if self.safety_shield is None:
++            return 0
++        return int(self.safety_shield.interventions)
++
++    def _shield_emergencies(self):
++        if self.safety_shield is None:
++            return 0
++        return int(self.safety_shield.emergency_interventions)
++
++    def _shield_recoveries(self):
++        if self.safety_shield is None:
++            return 0
++        return int(self.safety_shield.recovery_interventions)
++
++    def _shield_recovery_steps(self):
++        if self.safety_shield is None:
++            return 0
++        return int(self.safety_shield.recovery_steps)
++
+     def _teleport_to_segment_start(self, start, pose_start=None):
+         """Place the first segment at the planned start, then climb before navigation."""
+         import airsim
+@@ -303,6 +451,74 @@ class TD3SegmentExecutor:
+             return bool(np.all(axis_error <= config.FINAL_AXIS_TOLERANCE))
+         return bool(np.all(axis_error <= config.INTERMEDIATE_AXIS_TOLERANCE))
+ 
++    def _update_stuck_near_target_steps(self, current_count, distance, progress, speed, is_final_segment):
++        if is_final_segment:
++            return 0
++        close_enough = float(distance) <= float(config.INTERMEDIATE_STUCK_ACCEPT_DISTANCE)
++        low_progress = abs(float(progress)) <= float(config.INTERMEDIATE_STUCK_PROGRESS_EPS)
++        slow = float(speed) <= float(config.INTERMEDIATE_STUCK_SPEED_MAX)
++        if close_enough and low_progress and slow:
++            return int(current_count) + 1
++        return 0
++
++    def _update_intermediate_stall_steps(self, current_count, progress, speed, step, is_final_segment):
++        if is_final_segment:
++            return 0
++        if int(step) < int(getattr(config, "INTERMEDIATE_STALL_MIN_STEPS", 0)):
++            return 0
++
++        low_progress = abs(float(progress)) <= float(config.INTERMEDIATE_STALL_PROGRESS_EPS)
++        slow = float(speed) <= float(config.INTERMEDIATE_STALL_SPEED_MAX)
++        if low_progress and slow:
++            return int(current_count) + 1
++        return 0
++
++    def _intermediate_progress_advance_reason(
++        self,
++        distance,
++        initial_distance,
++        stalled_progress_steps,
++        is_final_segment,
++        timed_out=False,
++    ):
++        if is_final_segment:
++            return None
++
++        if not self._intermediate_has_enough_progress(
++            distance,
++            initial_distance,
++            is_final_segment,
++        ):
++            return None
++
++        if timed_out:
++            return "intermediate_timeout_progressed"
++
++        if int(stalled_progress_steps) >= int(config.INTERMEDIATE_STALL_WINDOW):
++            return "intermediate_stalled_progressed"
++
++        return None
++
++    def _intermediate_has_enough_progress(self, distance, initial_distance, is_final_segment):
++        if is_final_segment:
++            return False
++
++        distance = float(distance)
++        initial_distance = float(initial_distance)
++        if not np.isfinite(distance) or not np.isfinite(initial_distance) or initial_distance <= 1e-6:
++            return False
++
++        distance_threshold = min(
++            float(config.INTERMEDIATE_ADVANCE_ACCEPT_DISTANCE),
++            initial_distance * float(config.INTERMEDIATE_ADVANCE_PROGRESS_RATIO),
++        )
++        min_progress = min(
++            float(config.INTERMEDIATE_ADVANCE_MIN_PROGRESS),
++            initial_distance * 0.25,
++        )
++        reduced_distance = initial_distance - distance
++        return bool(distance <= distance_threshold and reduced_distance >= min_progress)
++
+     def close(self):
+         try:
+             self.env.client.armDisarm(False, vehicle_name=self.env.vehicle_name)
+diff --git a/Network/TD3_base/reinforcement_network.py b/Network/TD3_base/reinforcement_network.py
+index c9f4112..ea88677 100644
+--- a/Network/TD3_base/reinforcement_network.py
++++ b/Network/TD3_base/reinforcement_network.py
+@@ -154,6 +154,12 @@ class AirSimUAVEnv(gym.Env):
+         self.depth_norm_max = 20.0
+         self.lidar_norm_max = 20.0
+         self.current_lidar_min_dist = self.lidar_norm_max
++        self.vertical_clearance_safe_dist = 3.0
++        self.vertical_clearance_critical_dist = 1.2
++        self.vertical_clearance_danger_dist = 0.6
++        self.vertical_clearance_warn_weight = 4.0
++        self.vertical_clearance_critical_weight = 35.0
++        self.vertical_clearance_danger_penalty = 50.0
+         self.position_norm_max = 80.0
+         self.velocity_norm_max = 10.0
+         self.angular_acc_norm_max = 10.0
+@@ -161,7 +167,7 @@ class AirSimUAVEnv(gym.Env):
+         # 连续到达计数，用于训练脚本按条件保存模型
+         self.consecutive_arrivals = 0
+         #目的地可视化开关
+-        self.visualize_goal = False
++        self.visualize_goal = True
+         # 飞行轨迹可视化开关
+         self.visualize_traj = False
+ 
+@@ -186,6 +192,8 @@ class AirSimUAVEnv(gym.Env):
+         self.visualize_waypoints = False
+         self.show_goal_text = False
+         self.total_train_steps = 0
++        self.reward_mode = "training"
++        self.disable_crossed_border_termination = False
+ 
+     def _normalize_depth_obs(self, depth_tensor):
+         return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
+@@ -554,7 +562,8 @@ class AirSimUAVEnv(gym.Env):
+             'perpendicular_dist': perpendicular_dist,
+         }
+         # 收尾部分
+-        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
++        border_terminated = info['crossed_border'] and not self.disable_crossed_border_termination
++        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or border_terminated
+         truncated = self.step_count >= self.max_steps
+         info['end_reason'] = self._resolve_end_reason(info, terminated=terminated, truncated=truncated)
+         reward = self._calculate_reward(info)
+@@ -792,6 +801,10 @@ class AirSimUAVEnv(gym.Env):
+         self.traj_points = []
+         options = dict(options or {})
+         skip_stabilization = bool(options.pop("skip_stabilization", False))
++        self.reward_mode = str(options.pop("reward_mode", "training"))
++        self.disable_crossed_border_termination = bool(
++            options.pop("disable_crossed_border_termination", False)
++        )
+         if not skip_stabilization:
+             self.stabilize_before_reset()
+ 
+@@ -838,6 +851,9 @@ class AirSimUAVEnv(gym.Env):
+         return obs, {'start': self.current_start_pos, 'target': self.current_target, 'region': self.current_region}
+ 
+     def _calculate_reward(self, info):
++        if self.reward_mode == "hierarchical_test":
++            return self._calculate_hierarchical_test_reward(info)
++
+         """按照论文公式 (2)-(14) 实现"""
+         progress = info.get('progress', 0.0)
+         # 降低 progress 权重，避免策略只顾在平面上猛冲
+@@ -888,28 +904,7 @@ class AirSimUAVEnv(gym.Env):
+ 
+         # R_collision (公式 11)
+         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
+-        dis_z_bottom = info['dis_z_bottom']
+-        dis_z_top = info['dis_z_top']
+-        # 与地面障碍物距离定义的奖励
+-        if 0.5 <= dis_z_bottom < 1:
+-            r_z_bottom = -0.05
+-        elif 0.3 <= dis_z_bottom < 0.5:
+-            r_z_bottom = -0.1
+-        elif dis_z_bottom < 0.3:
+-            r_z_bottom = -0.2/dis_z_bottom
+-        else:
+-            r_z_bottom = 0
+-        # 与上方障碍物距离定义的奖励
+-        if 0.5 <= dis_z_top < 1:
+-            r_z_top = -0.05
+-        elif 0.3 <= dis_z_top < 0.5:
+-            r_z_top = -0.1
+-        elif dis_z_top < 0.3:
+-            r_z_top = -0.2/dis_z_top
+-        else:
+-            r_z_top = 0
+-        # 总距离奖励
+-        r_z = r_z_bottom + r_z_top
++        r_z = self._vertical_clearance_penalty(info)
+         lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
+         if 2.0 <= lidar_min_dist < 3.0:
+             r_lidar_clearance = -0.05 * self.lidar_clearance_weight
+@@ -945,6 +940,95 @@ class AirSimUAVEnv(gym.Env):
+ 
+         return r_progress + r_path + r_collision + r_stabilization + r_time + r_timeout
+ 
++    def _calculate_hierarchical_test_reward(self, info):
++        """Reward aligned with A* local-target execution during testing."""
++        progress = float(info.get('progress', 0.0))
++        r_progress = 3.0 * float(np.clip(progress, -3.0, 3.0))
++
++        d = float(info['dis2goal'])
++        D = max(float(self.start_dist), 1.0)
++        r_distance = -0.015 * min(d, D)
++        r_arrive = 600.0 if info['arrived'] else 0.0
++
++        xy_dist = float(info.get('xy_dist', d))
++        z_dist = float(info.get('z_dist', 0.0))
++        z_progress = float(info.get('z_progress', 0.0))
++        if xy_dist < self.goal_z_reward_radius:
++            r_vertical = 2.0 * z_progress - 0.35 * z_dist
++        else:
++            r_vertical = 1.0 * z_progress - 0.08 * min(z_dist, 8.0)
++
++        a_abs = abs(float(info.get('angle_to_target', 0.0)))
++        if a_abs < 20.0:
++            r_direction = 0.15
++        elif a_abs < 60.0:
++            r_direction = 0.0
++        else:
++            r_direction = -0.15 * (a_abs / 180.0)
++
++        r_failure = 0.0
++        if info['collision']:
++            r_failure -= 900.0
++        if info.get('out_of_ceiling', False):
++            r_failure -= 700.0
++
++        lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
++        if lidar_min_dist < 0.5:
++            r_lidar = -90.0
++        elif lidar_min_dist < 1.0:
++            r_lidar = -45.0
++        elif lidar_min_dist < 1.5:
++            r_lidar = -22.0
++        elif lidar_min_dist < 2.0:
++            r_lidar = -10.0
++        elif lidar_min_dist < 3.0:
++            r_lidar = -3.0
++        else:
++            r_lidar = 0.0
++
++        r_z_clearance = self._vertical_clearance_penalty(info)
++
++        v = float(info['v_magnitude'])
++        r_stability = -0.01 * float(info['angular_acc'])
++        if v < 0.2 and d > 3.0:
++            r_stability -= 0.1
++        elif v > 8.0:
++            r_stability -= 0.15 * (v - 8.0)
++
++        r_border_diag = -5.0 if info.get('crossed_border', False) else 0.0
++        r_time = -0.03
++        r_timeout = -250.0 if info.get('end_reason') == "timeout" else 0.0
++
++        return (
++            r_progress
++            + r_distance
++            + r_arrive
++            + r_vertical
++            + r_direction
++            + r_failure
++            + r_lidar
++            + r_z_clearance
++            + r_stability
++            + r_border_diag
++            + r_time
++            + r_timeout
++        )
++
++    def _vertical_clearance_penalty(self, info):
++        """Continuous penalty for flying too close to floor/ceiling obstacles."""
++        penalty = 0.0
++        for key in ("dis_z_bottom", "dis_z_top"):
++            distance = max(float(info.get(key, self.vertical_clearance_safe_dist)), 1e-3)
++            if distance < self.vertical_clearance_safe_dist:
++                error = self.vertical_clearance_safe_dist - distance
++                penalty -= self.vertical_clearance_warn_weight * error * error
++            if distance < self.vertical_clearance_critical_dist:
++                error = self.vertical_clearance_critical_dist - distance
++                penalty -= self.vertical_clearance_critical_weight * error * error
++            if distance < self.vertical_clearance_danger_dist:
++                penalty -= self.vertical_clearance_danger_penalty
++        return penalty
++
+     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
+         """
+         在终端实时格式化输出无人机飞行状态仪表盘
+diff --git a/Src/batch_test_script.py b/Src/batch_test_script.py
+index f106437..6604ecf 100644
+--- a/Src/batch_test_script.py
++++ b/Src/batch_test_script.py
+@@ -2,7 +2,8 @@ import os
+ import sys
+ import json
+ import csv
+-from nav_pipeline import NavPipeline
++import argparse
++from nav_pipeline import NavPipeline, model6_config
+ 
+ # Add project root to path
+ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+@@ -85,7 +86,7 @@ def run_batch_from_csv(csv_path):
+     summary = pipeline.run_batch_test(task_list, status_callback=print)
+ 
+     # Save results
+-    output_path = os.path.join(os.path.dirname(__file__), "batch_results.json")
++    output_path = os.path.join(os.path.dirname(__file__), "../test_backup/batch_results_6.8.json")
+     with open(output_path, 'w', encoding='utf-8') as f:
+         json.dump(summary, f, indent=4, ensure_ascii=False)
+ 
+@@ -98,4 +99,12 @@ def run_batch_from_csv(csv_path):
+     print("="*30)
+ 
+ if __name__ == "__main__":
+-    run_batch_from_csv(DEFAULT_TASK_CSV)
++    parser = argparse.ArgumentParser(description="Batch-test Astar_planner + TD3_base navigation tasks.")
++    parser.add_argument("--csv", default=DEFAULT_TASK_CSV, help="Task CSV with start_x,start_y,start_z,end_x,end_y,end_z.")
++    parser.add_argument("--no-safety-shield", action="store_true", help="Disable test-time lower-policy safety shield.")
++    args = parser.parse_args()
++
++    if args.no_safety_shield:
++        model6_config.SAFETY_SHIELD_ENABLED = False
++
++    run_batch_from_csv(args.csv)
+diff --git a/Src/nav_pipeline.py b/Src/nav_pipeline.py
+index ccf09c7..2a1ed19 100644
+--- a/Src/nav_pipeline.py
++++ b/Src/nav_pipeline.py
+@@ -126,13 +126,25 @@ class NavPipeline:
+             # Check results
+             arrived_segments = sum(1 for item in summaries if item["arrived"])
+             total_segments = len(waypoints) - 1
++            shield_interventions = sum(int(item.get("safety_shield_interventions", 0)) for item in summaries)
++            shield_emergencies = sum(int(item.get("safety_shield_emergency_interventions", 0)) for item in summaries)
++            shield_recoveries = sum(int(item.get("safety_shield_recovery_interventions", 0)) for item in summaries)
++            shield_recovery_steps = sum(int(item.get("safety_shield_recovery_steps", 0)) for item in summaries)
+             
+             if arrived_segments == total_segments:
+-                return True, f"Success: Reached destination ({arrived_segments}/{total_segments} segments)."
++                return True, (
++                    f"Success: Reached destination ({arrived_segments}/{total_segments} segments). "
++                    f"Shield interventions={shield_interventions}, emergencies={shield_emergencies}, "
++                    f"recoveries={shield_recoveries}, recovery_steps={shield_recovery_steps}."
++                )
+             else:
+                 failed_idx = len(summaries) - 1
+                 reason = summaries[-1]["end_reason"]
+-                return False, f"Failed at segment {failed_idx}: {reason} ({arrived_segments}/{total_segments} reached)."
++                return False, (
++                    f"Failed at segment {failed_idx}: {reason} ({arrived_segments}/{total_segments} reached). "
++                    f"Shield interventions={shield_interventions}, emergencies={shield_emergencies}, "
++                    f"recoveries={shield_recoveries}, recovery_steps={shield_recovery_steps}."
++                )
+                 
+         except Exception as e:
+             return False, f"Navigation error: {e}"

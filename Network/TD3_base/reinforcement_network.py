@@ -186,6 +186,7 @@ class AirSimUAVEnv(gym.Env):
         self.visualize_waypoints = False
         self.show_goal_text = False
         self.total_train_steps = 0
+        self.last_reward_terms = {}
 
     def _normalize_depth_obs(self, depth_tensor):
         return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
@@ -943,7 +944,32 @@ class AirSimUAVEnv(gym.Env):
         r_time = -0.05
         r_timeout = -200 if info.get('end_reason') == "timeout" else 0
 
-        return r_progress + r_path + r_collision + r_stabilization + r_time + r_timeout
+        total_reward = r_progress + r_path + r_collision + r_stabilization + r_time + r_timeout
+        self.last_reward_terms = {
+            "progress": float(r_progress),
+            "path": float(r_path),
+            "proximity": float(1.5 * r_proximity),
+            "step": float(r_step),
+            "direction": float(r_direction),
+            "arrive": float(r_arrive),
+            "border": float(r_border),
+            "vertical": float(r_vertical),
+            "vertical_progress": float(6.0 * z_progress),
+            "vertical_error": float(r_vertical_error),
+            "collision": float(r_collision),
+            "failure": float(r_failure),
+            "z_clearance": float(r_z),
+            "z_bottom": float(r_z_bottom),
+            "z_top": float(r_z_top),
+            "lidar": float(r_lidar_clearance),
+            "stabilization": float(r_stabilization),
+            "angular": float(r_ang),
+            "velocity": float(r_vel),
+            "time": float(r_time),
+            "timeout": float(r_timeout),
+            "total": float(total_reward),
+        }
+        return total_reward
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """
@@ -953,12 +979,20 @@ class AirSimUAVEnv(gym.Env):
         actual_acc = action_to_acceleration(action, accel_scale=self.accel_scale)
 
         # 使用 \r 回到行首覆盖输出，flush=True 强制刷新缓冲区
+        terms = getattr(self, "last_reward_terms", {})
         print(f"\r[Step {self.step_count:4d} | Total {self.total_train_steps:7d}] "
               f"Target: ({self.current_target[0]:5.1f}, {self.current_target[1]:5.1f}, {self.current_target[2]:5.1f}) | "
               f"Pos: ({drone_pos[0]:5.1f}, {drone_pos[1]:5.1f}, {drone_pos[2]:5.1f}) | "
               f"Vel: ({velocity[0]:5.1f}, {velocity[1]:5.1f}, {velocity[2]:5.1f}) | "
               f"Acc: ({actual_acc[0]:5.1f}, {actual_acc[1]:5.1f}, {actual_acc[2]:5.1f}) | "
-              f"Rwd: {reward:6.2f} ", end="", flush=True)
+              f"Rwd: {reward:6.2f} | "
+              f"RwdParts: prog={terms.get('progress', 0.0):5.2f}, "
+              f"step={terms.get('step', 0.0):5.2f}, "
+              f"vert={terms.get('vertical', 0.0):5.2f}, "
+              f"lidar={terms.get('lidar', 0.0):5.2f}, "
+              f"zclr={terms.get('z_clearance', 0.0):5.2f}, "
+              f"stab={terms.get('stabilization', 0.0):5.2f}, "
+              f"end={terms.get('collision', 0.0):5.2f} ", end="", flush=True)
 
 
         # 当一个回合结束（撞机、到达终点或超时）时，打印一个换行符，以免下一回合的输出挤在一起
