@@ -126,13 +126,25 @@ class NavPipeline:
             # Check results
             arrived_segments = sum(1 for item in summaries if item["arrived"])
             total_segments = len(waypoints) - 1
+            shield_interventions = sum(int(item.get("safety_shield_interventions", 0)) for item in summaries)
+            shield_emergencies = sum(int(item.get("safety_shield_emergency_interventions", 0)) for item in summaries)
+            shield_recoveries = sum(int(item.get("safety_shield_recovery_interventions", 0)) for item in summaries)
+            shield_recovery_steps = sum(int(item.get("safety_shield_recovery_steps", 0)) for item in summaries)
             
             if arrived_segments == total_segments:
-                return True, f"Success: Reached destination ({arrived_segments}/{total_segments} segments)."
+                return True, (
+                    f"Success: Reached destination ({arrived_segments}/{total_segments} segments). "
+                    f"Shield interventions={shield_interventions}, emergencies={shield_emergencies}, "
+                    f"recoveries={shield_recoveries}, recovery_steps={shield_recovery_steps}."
+                )
             else:
                 failed_idx = len(summaries) - 1
                 reason = summaries[-1]["end_reason"]
-                return False, f"Failed at segment {failed_idx}: {reason} ({arrived_segments}/{total_segments} reached)."
+                return False, (
+                    f"Failed at segment {failed_idx}: {reason} ({arrived_segments}/{total_segments} reached). "
+                    f"Shield interventions={shield_interventions}, emergencies={shield_emergencies}, "
+                    f"recoveries={shield_recoveries}, recovery_steps={shield_recovery_steps}."
+                )
                 
         except Exception as e:
             return False, f"Navigation error: {e}"

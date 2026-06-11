@@ -154,6 +154,12 @@ class AirSimUAVEnv(gym.Env):
         self.depth_norm_max = 20.0
         self.lidar_norm_max = 20.0
         self.current_lidar_min_dist = self.lidar_norm_max
+        self.vertical_clearance_safe_dist = 3.0
+        self.vertical_clearance_critical_dist = 1.2
+        self.vertical_clearance_danger_dist = 0.6
+        self.vertical_clearance_warn_weight = 4.0
+        self.vertical_clearance_critical_weight = 35.0
+        self.vertical_clearance_danger_penalty = 50.0
         self.position_norm_max = 80.0
         self.velocity_norm_max = 10.0
         self.angular_acc_norm_max = 10.0
@@ -161,7 +167,7 @@ class AirSimUAVEnv(gym.Env):
         # 连续到达计数，用于训练脚本按条件保存模型
         self.consecutive_arrivals = 0
         #目的地可视化开关
-        self.visualize_goal = False
+        self.visualize_goal = True
         # 飞行轨迹可视化开关
         self.visualize_traj = False
 
@@ -187,6 +193,8 @@ class AirSimUAVEnv(gym.Env):
         self.show_goal_text = False
         self.total_train_steps = 0
         self.last_reward_terms = {}
+        self.reward_mode = "training"
+        self.disable_crossed_border_termination = False
 
     def _normalize_depth_obs(self, depth_tensor):
         return torch.clamp(depth_tensor / self.depth_norm_max, 0.0, 1.0)
@@ -555,7 +563,8 @@ class AirSimUAVEnv(gym.Env):
             'perpendicular_dist': perpendicular_dist,
         }
         # 收尾部分
-        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or info['crossed_border']
+        border_terminated = info['crossed_border'] and not self.disable_crossed_border_termination
+        terminated = info['collision'] or info['arrived'] or info['out_of_ceiling'] or border_terminated
         truncated = self.step_count >= self.max_steps
         info['end_reason'] = self._resolve_end_reason(info, terminated=terminated, truncated=truncated)
         reward = self._calculate_reward(info)
@@ -793,6 +802,10 @@ class AirSimUAVEnv(gym.Env):
         self.traj_points = []
         options = dict(options or {})
         skip_stabilization = bool(options.pop("skip_stabilization", False))
+        self.reward_mode = str(options.pop("reward_mode", "training"))
+        self.disable_crossed_border_termination = bool(
+            options.pop("disable_crossed_border_termination", False)
+        )
         if not skip_stabilization:
             self.stabilize_before_reset()
 
@@ -839,6 +852,9 @@ class AirSimUAVEnv(gym.Env):
         return obs, {'start': self.current_start_pos, 'target': self.current_target, 'region': self.current_region}
 
     def _calculate_reward(self, info):
+        if self.reward_mode == "hierarchical_test":
+            return self._calculate_hierarchical_test_reward(info)
+
         """按照论文公式 (2)-(14) 实现"""
         progress = info.get('progress', 0.0)
         # 降低 progress 权重，避免策略只顾在平面上猛冲
@@ -889,28 +905,7 @@ class AirSimUAVEnv(gym.Env):
 
         # R_collision (公式 11)
         r_failure = -500 if info['collision'] or info.get('out_of_ceiling', False) else 0
-        dis_z_bottom = info['dis_z_bottom']
-        dis_z_top = info['dis_z_top']
-        # 与地面障碍物距离定义的奖励
-        if 0.5 <= dis_z_bottom < 1:
-            r_z_bottom = -0.05
-        elif 0.3 <= dis_z_bottom < 0.5:
-            r_z_bottom = -0.1
-        elif dis_z_bottom < 0.3:
-            r_z_bottom = -0.2/dis_z_bottom
-        else:
-            r_z_bottom = 0
-        # 与上方障碍物距离定义的奖励
-        if 0.5 <= dis_z_top < 1:
-            r_z_top = -0.05
-        elif 0.3 <= dis_z_top < 0.5:
-            r_z_top = -0.1
-        elif dis_z_top < 0.3:
-            r_z_top = -0.2/dis_z_top
-        else:
-            r_z_top = 0
-        # 总距离奖励
-        r_z = r_z_bottom + r_z_top
+        r_z, r_z_bottom, r_z_top = self._vertical_clearance_terms(info)
         lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
         if 2.0 <= lidar_min_dist < 3.0:
             r_lidar_clearance = -0.05 * self.lidar_clearance_weight
@@ -970,6 +965,127 @@ class AirSimUAVEnv(gym.Env):
             "total": float(total_reward),
         }
         return total_reward
+
+    def _calculate_hierarchical_test_reward(self, info):
+        """Reward aligned with A* local-target execution during testing."""
+        progress = float(info.get('progress', 0.0))
+        r_progress = 3.0 * float(np.clip(progress, -3.0, 3.0))
+
+        d = float(info['dis2goal'])
+        D = max(float(self.start_dist), 1.0)
+        r_distance = -0.015 * min(d, D)
+        r_arrive = 600.0 if info['arrived'] else 0.0
+
+        xy_dist = float(info.get('xy_dist', d))
+        z_dist = float(info.get('z_dist', 0.0))
+        z_progress = float(info.get('z_progress', 0.0))
+        if xy_dist < self.goal_z_reward_radius:
+            r_vertical = 2.0 * z_progress - 0.35 * z_dist
+        else:
+            r_vertical = 1.0 * z_progress - 0.08 * min(z_dist, 8.0)
+
+        a_abs = abs(float(info.get('angle_to_target', 0.0)))
+        if a_abs < 20.0:
+            r_direction = 0.15
+        elif a_abs < 60.0:
+            r_direction = 0.0
+        else:
+            r_direction = -0.15 * (a_abs / 180.0)
+
+        r_failure = 0.0
+        if info['collision']:
+            r_failure -= 900.0
+        if info.get('out_of_ceiling', False):
+            r_failure -= 700.0
+
+        lidar_min_dist = max(float(info.get('lidar_min_dist', self.lidar_norm_max)), 1e-3)
+        if lidar_min_dist < 0.5:
+            r_lidar = -90.0
+        elif lidar_min_dist < 1.0:
+            r_lidar = -45.0
+        elif lidar_min_dist < 1.5:
+            r_lidar = -22.0
+        elif lidar_min_dist < 2.0:
+            r_lidar = -10.0
+        elif lidar_min_dist < 3.0:
+            r_lidar = -3.0
+        else:
+            r_lidar = 0.0
+
+        r_z_clearance, r_z_bottom, r_z_top = self._vertical_clearance_terms(info)
+
+        v = float(info['v_magnitude'])
+        r_stability = -0.01 * float(info['angular_acc'])
+        if v < 0.2 and d > 3.0:
+            r_stability -= 0.1
+        elif v > 8.0:
+            r_stability -= 0.15 * (v - 8.0)
+
+        r_border_diag = -5.0 if info.get('crossed_border', False) else 0.0
+        r_time = -0.03
+        r_timeout = -250.0 if info.get('end_reason') == "timeout" else 0.0
+        total_reward = (
+            r_progress
+            + r_distance
+            + r_arrive
+            + r_vertical
+            + r_direction
+            + r_failure
+            + r_lidar
+            + r_z_clearance
+            + r_stability
+            + r_border_diag
+            + r_time
+            + r_timeout
+        )
+        self.last_reward_terms = {
+            "progress": float(r_progress),
+            "path": float(r_distance + r_arrive + r_vertical + r_direction + r_border_diag),
+            "proximity": 0.0,
+            "step": float(r_distance),
+            "direction": float(r_direction),
+            "arrive": float(r_arrive),
+            "border": float(r_border_diag),
+            "vertical": float(r_vertical),
+            "vertical_progress": float(z_progress),
+            "vertical_error": float(r_vertical - z_progress),
+            "collision": float(r_failure),
+            "failure": float(r_failure),
+            "z_clearance": float(r_z_clearance),
+            "z_bottom": float(r_z_bottom),
+            "z_top": float(r_z_top),
+            "lidar": float(r_lidar),
+            "stabilization": float(r_stability),
+            "angular": float(-0.01 * float(info['angular_acc'])),
+            "velocity": float(r_stability + 0.01 * float(info['angular_acc'])),
+            "time": float(r_time),
+            "timeout": float(r_timeout),
+            "total": float(total_reward),
+        }
+        return total_reward
+
+    def _vertical_clearance_terms(self, info):
+        bottom = self._single_vertical_clearance_penalty(info, "dis_z_bottom")
+        top = self._single_vertical_clearance_penalty(info, "dis_z_top")
+        return bottom + top, bottom, top
+
+    def _vertical_clearance_penalty(self, info):
+        """Continuous penalty for flying too close to floor/ceiling obstacles."""
+        total, _, _ = self._vertical_clearance_terms(info)
+        return total
+
+    def _single_vertical_clearance_penalty(self, info, key):
+        distance = max(float(info.get(key, self.vertical_clearance_safe_dist)), 1e-3)
+        penalty = 0.0
+        if distance < self.vertical_clearance_safe_dist:
+            error = self.vertical_clearance_safe_dist - distance
+            penalty -= self.vertical_clearance_warn_weight * error * error
+        if distance < self.vertical_clearance_critical_dist:
+            error = self.vertical_clearance_critical_dist - distance
+            penalty -= self.vertical_clearance_critical_weight * error * error
+        if distance < self.vertical_clearance_danger_dist:
+            penalty -= self.vertical_clearance_danger_penalty
+        return penalty
 
     def _render_dashboard(self, action, drone_pos, velocity, reward, terminated, truncated, info):
         """

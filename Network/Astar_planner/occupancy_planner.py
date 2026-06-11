@@ -7,6 +7,11 @@ import numpy as np
 
 import config
 
+try:
+    from scipy.ndimage import distance_transform_edt
+except Exception:
+    distance_transform_edt = None
+
 
 def _matches_any(name, patterns):
     lower = name.lower()
@@ -187,7 +192,8 @@ class TopDownOccupancyGrid(OccupancyGrid):
         self.y_max = self.y_min + (self.width - 1) * self.resolution_y
 
     def to_metadata(self):
-        return {
+        metadata = dict(self.metadata)
+        metadata.update({
             "coverage": {
                 "x_min": self.x_min,
                 "x_max": self.x_max,
@@ -205,7 +211,8 @@ class TopDownOccupancyGrid(OccupancyGrid):
                     "col": self.origin_col,
                 },
             },
-        }
+        })
+        return metadata
 
     def world_to_cell(self, point):
         return (
@@ -286,6 +293,8 @@ class OccupancyAStarPlanner:
     def __init__(self, client):
         self.client = client
         self._enforce_target_clearance = True
+        self._target_clearance_override = None
+        self._corridor_clearance_override = None
 
     def plan(self, start, goal):
         start = np.asarray(start, dtype=np.float32)
@@ -341,9 +350,12 @@ class OccupancyAStarPlanner:
                 goal,
                 keep_original_endpoints=False,
             )
-            # Use base_grid (intact buildings, no clear_disc) for all LOS / occupied checks.
             try:
-                local_targets = self._extract_local_targets(base_grid, raw_points)
+                local_targets = self._extract_local_targets_with_safety_profiles(
+                    base_grid,
+                    raw_points,
+                    planner_label=f"occupancy safety_margin={safety_margin:.1f}",
+                )
             except RuntimeError as exc:
                 print(f"[Astar_planner] Reject occupancy path at safety_margin={safety_margin:.1f}: {exc}")
                 continue
@@ -353,7 +365,7 @@ class OccupancyAStarPlanner:
             return self._make_plan(local_targets, cells, "occupancy")
 
         if config.OCCUPANCY_LEGACY_FALLBACK:
-            print("[Astar_planner] Safe occupancy A* failed; retrying legacy A* without clearance penalties.")
+            print("[Astar_planner] Safe occupancy A* failed; retrying legacy A* with local-target clearance profiles.")
             legacy_plan = self._plan_legacy(base_grid, start, goal)
             if legacy_plan is not None:
                 return legacy_plan
@@ -375,7 +387,7 @@ class OccupancyAStarPlanner:
     def _plan_legacy(self, base_grid, start, goal):
         last_cells = None
         previous_enforcement = self._enforce_target_clearance
-        self._enforce_target_clearance = False
+        self._enforce_target_clearance = True
         try:
             for _, safety_margin in config.OCCUPANCY_RADIUS_FALLBACKS:
                 grid = self._inflate_grid(base_grid, safety_margin)
@@ -408,14 +420,18 @@ class OccupancyAStarPlanner:
                     keep_original_endpoints=False,
                 )
                 try:
-                    local_targets = self._extract_local_targets(base_grid, raw_points)
+                    local_targets = self._extract_local_targets_with_safety_profiles(
+                        base_grid,
+                        raw_points,
+                        planner_label=f"legacy safety_margin={safety_margin:.1f}",
+                    )
                 except RuntimeError as exc:
                     print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: {exc}")
                     continue
                 if len(local_targets) < 2:
                     print(f"[Astar_planner] Reject legacy occupancy path at safety_margin={safety_margin:.1f}: insufficient local targets")
                     continue
-                print("[Astar_planner] WARNING: using legacy occupancy fallback; local targets may be closer to obstacles.")
+                print("[Astar_planner] WARNING: using legacy occupancy fallback with strict local-target clearance.")
                 return self._make_plan(local_targets, cells, "occupancy_legacy")
         finally:
             self._enforce_target_clearance = previous_enforcement
@@ -792,6 +808,13 @@ class OccupancyAStarPlanner:
         if preferred_clearance <= 0.0 or preferred_clearance <= min_clearance:
             return None
 
+        if distance_transform_edt is not None:
+            return self._build_clearance_cost_fast(
+                grid,
+                min_clearance,
+                preferred_clearance,
+            )
+
         radius_cells = int(math.ceil(preferred_clearance / grid.resolution))
         cost = np.zeros(grid.occupied.shape, dtype=np.float32)
         occupied_axis0, occupied_axis1 = np.where(grid.occupied)
@@ -816,6 +839,30 @@ class OccupancyAStarPlanner:
         return cost
 
     @staticmethod
+    def _build_clearance_cost_fast(grid, min_clearance, preferred_clearance):
+        distances = OccupancyAStarPlanner._build_clearance_distance_map(grid)
+        cost = np.zeros(grid.occupied.shape, dtype=np.float32)
+        free_mask = ~grid.occupied
+
+        blocked = free_mask & (distances < float(min_clearance))
+        warned = (
+            free_mask
+            & (distances >= float(min_clearance))
+            & (distances <= float(preferred_clearance))
+        )
+
+        cost[blocked] = np.inf
+        denom = max(float(preferred_clearance) - float(min_clearance), 1e-6)
+        cost[warned] = (float(preferred_clearance) - distances[warned]) / denom
+        return cost
+
+    @staticmethod
+    def _build_clearance_distance_map(grid):
+        if distance_transform_edt is None:
+            return None
+        return distance_transform_edt(~grid.occupied) * float(grid.resolution)
+
+    @staticmethod
     def _cell_cost(grid, cost, cell):
         if isinstance(grid, TopDownOccupancyGrid):
             return float(cost[cell[0], cell[1]])
@@ -827,6 +874,53 @@ class OccupancyAStarPlanner:
             cost[cell[0], cell[1]] = value
         else:
             cost[cell[1], cell[0]] = value
+
+    @staticmethod
+    def _cell_clearance(grid, clearance_distances, cell):
+        if clearance_distances is None:
+            return 0.0
+        if not grid.in_bounds(cell):
+            return 0.0
+        if isinstance(grid, TopDownOccupancyGrid):
+            return float(clearance_distances[cell[0], cell[1]])
+        return float(clearance_distances[cell[1], cell[0]])
+
+    def _is_corridor_clear(self, grid, point_a, point_b, clearance=None, clearance_distances=None):
+        if not grid.is_line_clear(point_a, point_b):
+            return False
+
+        if clearance is None:
+            clearance = self._active_corridor_clearance()
+        raw_clearance = float(clearance)
+        effective_clearance = self._effective_target_clearance(grid, raw_clearance)
+        if effective_clearance <= 0.0:
+            return True
+
+        xy_a = np.asarray(point_a[:2], dtype=np.float32)
+        xy_b = np.asarray(point_b[:2], dtype=np.float32)
+        distance = float(np.linalg.norm(xy_b - xy_a))
+        sample_step = max(float(getattr(config, "LOCAL_TARGET_CORRIDOR_SAMPLE_STEP", 1.0)), 1e-3)
+        sample_count = max(int(math.ceil(distance / sample_step)), 1)
+        z_a = float(point_a[2])
+        z_b = float(point_b[2])
+        for index in range(sample_count + 1):
+            ratio = index / float(sample_count)
+            sample = np.array(
+                [
+                    xy_a[0] + (xy_b[0] - xy_a[0]) * ratio,
+                    xy_a[1] + (xy_b[1] - xy_a[1]) * ratio,
+                    z_a + (z_b - z_a) * ratio,
+                ],
+                dtype=np.float32,
+            )
+            if not self._has_target_clearance(
+                grid,
+                sample,
+                clearance=raw_clearance,
+                clearance_distances=clearance_distances,
+            ):
+                return False
+        return True
 
     def _astar(self, grid, start, goal, clearance_cost=None):
         if not grid.is_free(start) or not grid.is_free(goal):
@@ -893,7 +987,126 @@ class OccupancyAStarPlanner:
             points[-1] = goal
         return points
 
+    def _extract_local_targets_with_safety_profiles(self, grid, raw_points, planner_label="occupancy"):
+        profiles = tuple(getattr(config, "LOCAL_TARGET_SAFETY_PROFILES", ()))
+        if not profiles:
+            profiles = ((config.LOCAL_TARGET_CLEARANCE, config.LOCAL_TARGET_CORRIDOR_CLEARANCE),)
+
+        last_error = None
+        previous_target = self._target_clearance_override
+        previous_corridor = self._corridor_clearance_override
+        try:
+            for target_clearance, corridor_clearance in profiles:
+                self._target_clearance_override = float(target_clearance)
+                self._corridor_clearance_override = float(corridor_clearance)
+                try:
+                    local_targets = self._extract_local_targets(grid, raw_points)
+                except RuntimeError as exc:
+                    last_error = exc
+                    print(
+                        f"[Astar_planner] Reject {planner_label} local-target profile "
+                        f"target={target_clearance:.1f}, corridor={corridor_clearance:.1f}: {exc}"
+                    )
+                    continue
+                if len(local_targets) >= 2:
+                    print(
+                        f"[Astar_planner] Local-target safety profile selected: "
+                        f"target={target_clearance:.1f}, corridor={corridor_clearance:.1f}"
+                    )
+                    return local_targets
+                last_error = RuntimeError("insufficient local targets")
+        finally:
+            self._target_clearance_override = previous_target
+            self._corridor_clearance_override = previous_corridor
+
+        if last_error is not None:
+            raise RuntimeError(str(last_error))
+        raise RuntimeError("No local-target safety profile succeeded.")
+
     def _extract_local_targets(self, grid, raw_points):
+        return self._extract_local_targets_monotonic(grid, raw_points)
+
+    def _extract_local_targets_monotonic(self, grid, raw_points):
+        """Extract local targets while moving strictly forward on the raw A* path."""
+        if len(raw_points) <= 2:
+            return raw_points
+
+        selected = [raw_points[0]]
+        clearance_distances = self._build_clearance_distance_map(grid)
+        current_index = 0
+        last_raw_index = len(raw_points) - 2
+
+        while current_index < last_raw_index:
+            end_index = self._forward_index_at_distance(
+                raw_points,
+                current_index,
+                float(config.LOCAL_TARGET_SPACING),
+            )
+            end_index = min(max(end_index, current_index + 1), last_raw_index)
+
+            bridge = self._find_reachable_path_bridge(
+                grid,
+                raw_points,
+                selected[-1],
+                end_index=end_index,
+                clearance_distances=clearance_distances,
+                require_clearance=self._enforce_target_clearance,
+                start_index=current_index,
+            )
+            if bridge is None and self._enforce_target_clearance:
+                bridge = self._find_reachable_path_bridge(
+                    grid,
+                    raw_points,
+                    selected[-1],
+                    end_index=end_index,
+                    clearance_distances=clearance_distances,
+                    require_clearance=False,
+                    start_index=current_index,
+                )
+
+            if bridge is None:
+                raise RuntimeError(
+                    f"No reachable local-target bridge from raw path index {current_index} "
+                    f"toward {end_index}."
+                )
+
+            next_index, next_point = bridge
+            if next_index <= current_index:
+                raise RuntimeError(
+                    f"Local-target extraction stalled at raw path index {current_index}."
+                )
+
+            if float(np.linalg.norm(next_point - selected[-1])) > 1e-3:
+                selected.append(next_point)
+            current_index = next_index
+
+        goal_point = raw_points[-1]
+        goal_cell = grid.world_to_cell(goal_point)
+        if not grid.is_free(goal_cell):
+            free_goal_cell = grid.nearest_free(goal_cell, config.OCCUPANCY_NEAREST_FREE_RADIUS)
+            if free_goal_cell is None:
+                free_goal_cell = grid.nearest_free(goal_cell, config.OCCUPANCY_NEAREST_FREE_RADIUS * 2)
+            if free_goal_cell is None:
+                raise RuntimeError(
+                    f"Goal remains inside an obstacle and no free cell was found within "
+                    f"{config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m."
+                )
+            goal_point = grid.cell_to_world(free_goal_cell, float(goal_point[2]))
+            print(f"[Astar_planner] WARNING: Goal moved to nearest free cell: {goal_point}")
+
+        if not self._is_goal_tail_clear(grid, selected[-1], goal_point, clearance_distances=clearance_distances):
+            tail_points = list(raw_points)
+            tail_points[-1] = goal_point
+            self._append_blocked_tail(grid, selected, tail_points, clearance_distances=clearance_distances)
+        elif float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
+            selected[-1] = goal_point
+        else:
+            selected.append(goal_point)
+
+        selected = self._dedupe_local_targets(selected)
+        self._log_local_target_clearance(grid, selected, clearance_distances)
+        return selected
+
         """Extract sparse local targets from the dense A* path.
 
         Walks the dense path and selects points that are at least
@@ -914,6 +1127,7 @@ class OccupancyAStarPlanner:
         selected = [raw_points[0]]
         last_selected = raw_points[0]
         previous_direction = None
+        clearance_distances = self._build_clearance_distance_map(grid)
 
         for index in range(1, len(raw_points) - 1):
             current = raw_points[index]
@@ -956,7 +1170,18 @@ class OccupancyAStarPlanner:
                     index,
                     last_selected,
                     min_distance=config.LOCAL_TARGET_MIN_SPACING,
+                    clearance_distances=clearance_distances,
                 )
+                if safe_current is None:
+                    safe_current = self._safe_target_near_index(
+                        grid,
+                        raw_points,
+                        index,
+                        last_selected,
+                        min_distance=config.LOCAL_TARGET_MIN_SPACING,
+                        clearance_distances=clearance_distances,
+                        require_clearance=False,
+                    )
                 if safe_current is not None:
                     selected.append(safe_current)
                     last_selected = safe_current
@@ -968,8 +1193,8 @@ class OccupancyAStarPlanner:
                         bt_cell = grid.world_to_cell(bt)
                         if (
                             grid.is_free(bt_cell)
-                            and self._has_target_clearance(grid, bt)
-                            and grid.is_line_clear(last_selected, bt)
+                            and self._has_target_clearance(grid, bt, clearance_distances=clearance_distances)
+                            and self._is_corridor_clear(grid, last_selected, bt, clearance_distances=clearance_distances)
                         ):
                             selected.append(bt)
                             last_selected = bt
@@ -979,8 +1204,8 @@ class OccupancyAStarPlanner:
                     cur_cell = grid.world_to_cell(current)
                     if (
                         grid.is_free(cur_cell)
-                        and self._has_target_clearance(grid, current)
-                        and grid.is_line_clear(last_selected, current)
+                        and self._has_target_clearance(grid, current, clearance_distances=clearance_distances)
+                        and self._is_corridor_clear(grid, last_selected, current, clearance_distances=clearance_distances)
                     ):
                         selected.append(current)
                         last_selected = current
@@ -1033,14 +1258,15 @@ class OccupancyAStarPlanner:
                         f"Goal remains inside an obstacle and no free cell was found within "
                         f"{config.OCCUPANCY_NEAREST_FREE_RADIUS * 2}m."
                     )
-        elif not grid.is_line_clear(selected[-1], goal_point):
-            self._append_blocked_tail(grid, selected, raw_points)
+        elif not self._is_goal_tail_clear(grid, selected[-1], goal_point, clearance_distances=clearance_distances):
+            self._append_blocked_tail(grid, selected, raw_points, clearance_distances=clearance_distances)
         elif float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
             selected[-1] = goal_point
         else:
             selected.append(goal_point)
 
         selected = self._uniform_resample_local_targets(grid, raw_points, selected)
+        self._log_local_target_clearance(grid, selected, clearance_distances)
         return selected
 
     def _uniform_resample_local_targets(self, grid, raw_points, fallback_targets):
@@ -1063,6 +1289,7 @@ class OccupancyAStarPlanner:
 
         sampled = [raw_points[0]]
         last_selected = sampled[0]
+        clearance_distances = self._build_clearance_distance_map(grid)
         for sample_index in range(1, segment_count):
             desired_distance = target_spacing * sample_index
             preferred_index = self._nearest_path_index_at_distance(distances, desired_distance)
@@ -1072,6 +1299,7 @@ class OccupancyAStarPlanner:
                 preferred_index,
                 last_selected,
                 min_distance=config.LOCAL_TARGET_MIN_SPACING,
+                clearance_distances=clearance_distances,
             )
             if candidate is None:
                 return fallback_targets
@@ -1079,7 +1307,7 @@ class OccupancyAStarPlanner:
             last_selected = candidate
 
         goal_point = fallback_targets[-1]
-        if not grid.is_line_clear(sampled[-1], goal_point):
+        if not self._is_corridor_clear(grid, sampled[-1], goal_point, clearance_distances=clearance_distances):
             return fallback_targets
         if float(np.linalg.norm(goal_point - sampled[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(sampled) > 1:
             sampled[-1] = goal_point
@@ -1099,6 +1327,27 @@ class OccupancyAStarPlanner:
             step = float(np.linalg.norm(points[index] - points[index - 1]))
             distances.append(distances[-1] + step)
         return distances
+
+    @staticmethod
+    def _forward_index_at_distance(points, start_index, target_distance):
+        accumulated = 0.0
+        last_index = max(len(points) - 2, 0)
+        for index in range(int(start_index) + 1, last_index + 1):
+            accumulated += float(np.linalg.norm(points[index] - points[index - 1]))
+            if accumulated >= float(target_distance):
+                return index
+        return last_index
+
+    @staticmethod
+    def _dedupe_local_targets(points):
+        if not points:
+            return points
+        deduped = [points[0]]
+        for point in points[1:]:
+            if float(np.linalg.norm(point - deduped[-1])) <= 1e-3:
+                continue
+            deduped.append(point)
+        return deduped
 
     @staticmethod
     def _nearest_path_index_at_distance(distances, desired_distance):
@@ -1130,6 +1379,23 @@ class OccupancyAStarPlanner:
             return float("inf")
         return float(np.std(distances) / mean_distance)
 
+    def _log_local_target_clearance(self, grid, points, clearance_distances=None):
+        if clearance_distances is None or len(points) <= 2:
+            return
+        middle_points = points[1:-1]
+        clearances = [
+            self._cell_clearance(grid, clearance_distances, grid.world_to_cell(point))
+            for point in middle_points
+        ]
+        if not clearances:
+            return
+        print(
+            f"[Astar_planner] Local target clearance: "
+            f"min={min(clearances):.1f}m, mean={float(np.mean(clearances)):.1f}m, "
+            f"target_req={self._effective_target_clearance(grid, self._active_target_clearance()):.1f}m, "
+            f"corridor_req={self._effective_target_clearance(grid, self._active_corridor_clearance()):.1f}m"
+        )
+
     def _append_reachable_target_or_bridge(self, grid, selected, raw_points, last_selected, current, index):
         backtrack_found = False
         for k in range(index - 1, 0, -1):
@@ -1146,15 +1412,17 @@ class OccupancyAStarPlanner:
         elif not backtrack_found:
             pass
 
-    def _has_target_clearance(self, grid, point, clearance=None):
+    def _has_target_clearance(self, grid, point, clearance=None, clearance_distances=None):
         if clearance is None:
-            clearance = config.LOCAL_TARGET_CLEARANCE
+            clearance = self._active_target_clearance()
         clearance = self._effective_target_clearance(grid, clearance)
         cell = grid.world_to_cell(point)
         if not grid.is_free(cell):
             return False
         if clearance <= 0.0:
             return True
+        if clearance_distances is not None:
+            return self._cell_clearance(grid, clearance_distances, cell) >= float(clearance)
 
         radius_cells = int(math.ceil(clearance / grid.resolution))
         for d0 in range(-radius_cells, radius_cells + 1):
@@ -1166,6 +1434,19 @@ class OccupancyAStarPlanner:
                     return False
         return True
 
+    def _is_goal_tail_clear(self, grid, point_a, goal_point, clearance_distances=None):
+        if self._is_corridor_clear(
+            grid,
+            point_a,
+            goal_point,
+            clearance_distances=clearance_distances,
+        ):
+            return True
+        # Dataset endpoints are sometimes close to building facades.  Keep the
+        # middle local targets safe, but allow the final approach to degrade to
+        # plain LOS so planning does not fail solely because the goal is narrow.
+        return grid.is_line_clear(point_a, goal_point)
+
     @staticmethod
     def _effective_target_clearance(grid, clearance):
         clearance = float(clearance)
@@ -1174,9 +1455,83 @@ class OccupancyAStarPlanner:
         inflated = float(grid.metadata.get("inflate_meters", 0.0))
         return max(0.0, clearance - inflated)
 
-    def _safe_target_near_index(self, grid, raw_points, preferred_index, last_selected, min_distance=0.0):
+    def _active_target_clearance(self):
+        if self._target_clearance_override is not None:
+            return float(self._target_clearance_override)
+        return float(config.LOCAL_TARGET_CLEARANCE)
+
+    def _active_corridor_clearance(self):
+        if self._corridor_clearance_override is not None:
+            return float(self._corridor_clearance_override)
+        return float(getattr(config, "LOCAL_TARGET_CORRIDOR_CLEARANCE", config.LOCAL_TARGET_CLEARANCE))
+
+    def _path_index_for_point(self, grid, raw_points, point):
+        point_cell = grid.world_to_cell(point)
+        best_index = 0
+        best_distance = float("inf")
+        for index, raw_point in enumerate(raw_points):
+            raw_cell = grid.world_to_cell(raw_point)
+            if raw_cell == point_cell:
+                return index
+            distance = float(np.linalg.norm(np.asarray(raw_point[:2]) - np.asarray(point[:2])))
+            if distance < best_distance:
+                best_distance = distance
+                best_index = index
+        return best_index
+
+    def _find_reachable_path_bridge(
+        self,
+        grid,
+        raw_points,
+        from_point,
+        end_index=None,
+        clearance_distances=None,
+        require_clearance=True,
+        min_distance=1e-3,
+        start_index=None,
+    ):
+        if len(raw_points) <= 2:
+            return None
+
+        if start_index is None:
+            start_index = self._path_index_for_point(grid, raw_points, from_point)
+        else:
+            start_index = int(start_index)
+        if end_index is None:
+            end_index = len(raw_points) - 2
+        end_index = min(int(end_index), len(raw_points) - 2)
+        if end_index <= start_index:
+            return None
+
+        for index in range(end_index, start_index, -1):
+            candidate = raw_points[index]
+            candidate_cell = grid.world_to_cell(candidate)
+            if not grid.is_free(candidate_cell):
+                continue
+            if float(np.linalg.norm(candidate - from_point)) < float(min_distance):
+                continue
+            if require_clearance and self._enforce_target_clearance:
+                if not self._has_target_clearance(grid, candidate, clearance_distances=clearance_distances):
+                    continue
+            if not self._is_corridor_clear(grid, from_point, candidate, clearance_distances=clearance_distances):
+                continue
+            return index, candidate
+        return None
+
+    def _safe_target_near_index(
+        self,
+        grid,
+        raw_points,
+        preferred_index,
+        last_selected,
+        min_distance=0.0,
+        clearance_distances=None,
+        require_clearance=True,
+    ):
         max_offset = max(int(math.ceil(config.LOCAL_TARGET_SPACING / grid.resolution)), 1)
         last_raw_index = len(raw_points) - 2
+        best = None
+        best_score = -float("inf")
         for offset in range(0, max_offset + 1):
             candidate_indices = [preferred_index] if offset == 0 else [
                 preferred_index - offset,
@@ -1188,16 +1543,28 @@ class OccupancyAStarPlanner:
                 candidate = raw_points[candidate_index]
                 if float(np.linalg.norm(candidate - last_selected)) < float(min_distance):
                     continue
-                if not self._has_target_clearance(grid, candidate):
+                if require_clearance and not self._has_target_clearance(
+                    grid,
+                    candidate,
+                    clearance_distances=clearance_distances,
+                ):
                     continue
-                if grid.is_line_clear(last_selected, candidate):
-                    return candidate
-        return None
+                if not self._is_corridor_clear(grid, last_selected, candidate, clearance_distances=clearance_distances):
+                    continue
 
-    def _append_blocked_tail(self, grid, selected, raw_points):
+                candidate_cell = grid.world_to_cell(candidate)
+                clearance_score = self._cell_clearance(grid, clearance_distances, candidate_cell)
+                index_penalty = 0.05 * abs(candidate_index - preferred_index)
+                score = clearance_score - index_penalty
+                if score > best_score:
+                    best_score = score
+                    best = candidate
+        return best
+
+    def _append_blocked_tail(self, grid, selected, raw_points, clearance_distances=None):
         goal_point = raw_points[-1]
         guard = 0
-        while not grid.is_line_clear(selected[-1], goal_point):
+        while not self._is_goal_tail_clear(grid, selected[-1], goal_point, clearance_distances=clearance_distances):
             guard += 1
             if guard > len(raw_points):
                 raise RuntimeError(
@@ -1205,23 +1572,21 @@ class OccupancyAStarPlanner:
                     f"to {goal_point}."
                 )
 
-            bridge = None
-            last_cell = grid.world_to_cell(selected[-1])
-            for index in range(len(raw_points) - 2, 0, -1):
-                candidate = raw_points[index]
-                candidate_cell = grid.world_to_cell(candidate)
-                if candidate_cell == last_cell:
-                    break
-                if (
-                    grid.is_free(candidate_cell)
-                    and (
-                        not self._enforce_target_clearance
-                        or self._has_target_clearance(grid, candidate)
-                    )
-                    and grid.is_line_clear(selected[-1], candidate)
-                ):
-                    bridge = candidate
-                    break
+            bridge = self._find_reachable_path_bridge(
+                grid,
+                raw_points,
+                selected[-1],
+                clearance_distances=clearance_distances,
+                require_clearance=True,
+            )
+            if bridge is None:
+                bridge = self._find_reachable_path_bridge(
+                    grid,
+                    raw_points,
+                    selected[-1],
+                    clearance_distances=clearance_distances,
+                    require_clearance=False,
+                )
 
             if bridge is None:
                 raise RuntimeError(
@@ -1229,12 +1594,13 @@ class OccupancyAStarPlanner:
                     f"to {goal_point}, and no clear bridge point was found."
                 )
 
-            if float(np.linalg.norm(bridge - selected[-1])) < 1e-3:
+            _, bridge_point = bridge
+            if float(np.linalg.norm(bridge_point - selected[-1])) < 1e-3:
                 raise RuntimeError(
                     f"Final direct segment to goal is blocked from {selected[-1]} "
                     f"to {goal_point}, and bridge search stalled."
                 )
-            selected.append(bridge)
+            selected.append(bridge_point)
 
         if float(np.linalg.norm(goal_point - selected[-1])) < config.LOCAL_TARGET_MIN_SPACING and len(selected) > 1:
             selected[-1] = goal_point

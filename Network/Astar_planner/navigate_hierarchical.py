@@ -53,7 +53,15 @@ def main():
         action="store_true",
         help="Connect to AirSim and filter local targets using segmentation obstacle poses",
     )
+    parser.add_argument(
+        "--no-safety-shield",
+        action="store_true",
+        help="Disable test-time lower-policy safety shield.",
+    )
     args = parser.parse_args()
+
+    if args.no_safety_shield:
+        config.SAFETY_SHIELD_ENABLED = False
 
     start = np.array(args.start, dtype=np.float32)
     goal = np.array(args.goal, dtype=np.float32)

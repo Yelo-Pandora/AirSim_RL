@@ -2,7 +2,8 @@ import os
 import sys
 import json
 import csv
-from nav_pipeline import NavPipeline
+import argparse
+from nav_pipeline import NavPipeline, model6_config
 
 # Add project root to path
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -85,7 +86,7 @@ def run_batch_from_csv(csv_path):
     summary = pipeline.run_batch_test(task_list, status_callback=print)
 
     # Save results
-    output_path = os.path.join(os.path.dirname(__file__), "batch_results.json")
+    output_path = os.path.join(os.path.dirname(__file__), "../test_backup/batch_results_6.8.json")
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)
 
@@ -98,4 +99,12 @@ def run_batch_from_csv(csv_path):
     print("="*30)
 
 if __name__ == "__main__":
-    run_batch_from_csv(DEFAULT_TASK_CSV)
+    parser = argparse.ArgumentParser(description="Batch-test Astar_planner + TD3_base navigation tasks.")
+    parser.add_argument("--csv", default=DEFAULT_TASK_CSV, help="Task CSV with start_x,start_y,start_z,end_x,end_y,end_z.")
+    parser.add_argument("--no-safety-shield", action="store_true", help="Disable test-time lower-policy safety shield.")
+    args = parser.parse_args()
+
+    if args.no_safety_shield:
+        model6_config.SAFETY_SHIELD_ENABLED = False
+
+    run_batch_from_csv(args.csv)

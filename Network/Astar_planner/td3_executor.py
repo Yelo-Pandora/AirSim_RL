@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 import config
+from safety_shield import RuntimeSafetyShield
 
 
 MODEL1_DIR = os.path.join(config.NETWORK_DIR, "TD3_base")
@@ -41,6 +42,11 @@ class TD3SegmentExecutor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Astar_planner] Loading TD3 lower policy: {self.model_path}")
         self.model = TD3.load(self.model_path, env=self.env, device=self.device)
+        self.safety_shield = (
+            RuntimeSafetyShield(self.env)
+            if bool(getattr(config, "SAFETY_SHIELD_ENABLED", False))
+            else None
+        )
 
     def draw_global_path(self, points):
         if not config.VISUALIZE_GLOBAL_PATH:
@@ -147,37 +153,104 @@ class TD3SegmentExecutor:
             "start_pos": start.tolist(),
             "target": target.tolist(),
             "region": f"model6_segment_{segment_index}",
+            "reward_mode": "hierarchical_test",
+            "disable_crossed_border_termination": True,
         }
         if teleport_to_start:
             reset_options["skip_stabilization"] = True
 
         obs, _ = self.env.reset(options=reset_options)
+        if self.safety_shield is not None:
+            self.safety_shield.reset()
+
+        initial_segment_distance = float(
+            getattr(
+                self.env,
+                "start_dist",
+                np.linalg.norm(target - start),
+            )
+        )
+        if not np.isfinite(initial_segment_distance) or initial_segment_distance <= 1e-6:
+            initial_segment_distance = float(np.linalg.norm(target - start))
 
         total_reward = 0.0
         last_info = {}
-        for step in range(config.SEGMENT_MAX_STEPS):
+        stuck_near_target_steps = 0
+        stalled_progress_steps = 0
+        step = 0
+        while step < self._segment_step_budget():
+            step += 1
             action, _ = self.model.predict(obs, deterministic=config.DETERMINISTIC_POLICY)
+            if self.safety_shield is not None:
+                action, shield_diag = self.safety_shield.filter_action(action, obs)
             obs, reward, terminated, truncated, info = self.env.step(action)
+            if self.safety_shield is not None:
+                info["safety_shield_reason"] = self.safety_shield.last_reason
+                info["safety_shield_interventions"] = self.safety_shield.interventions
+                info["safety_shield_recovery_interventions"] = self.safety_shield.recovery_interventions
+                info["safety_shield_recovery_steps"] = self.safety_shield.recovery_steps
             total_reward += float(reward)
             last_info = info
 
             arrived = bool(info.get("arrived", False))
             distance = float(info.get("dis2goal", np.inf))
             axis_error = self._axis_error_to_target(target)
+            progress = float(info.get("progress", 0.0))
+            speed = float(info.get("v_magnitude", np.inf))
+            stuck_near_target_steps = self._update_stuck_near_target_steps(
+                stuck_near_target_steps,
+                distance,
+                progress,
+                speed,
+                is_final_segment,
+            )
+            stalled_progress_steps = self._update_intermediate_stall_steps(
+                stalled_progress_steps,
+                progress,
+                speed,
+                step,
+                is_final_segment,
+            )
             segment_reached = self._segment_reached(arrived, distance, axis_error, is_final_segment)
+            if (
+                not segment_reached
+                and stuck_near_target_steps >= config.INTERMEDIATE_STUCK_WINDOW
+                and self._intermediate_has_enough_progress(
+                    distance,
+                    initial_segment_distance,
+                    is_final_segment,
+                )
+            ):
+                segment_reached = True
+                info["end_reason"] = "stuck_near_intermediate"
+            if not segment_reached:
+                advance_reason = self._intermediate_progress_advance_reason(
+                    distance,
+                    initial_segment_distance,
+                    stalled_progress_steps,
+                    is_final_segment,
+                    timed_out=False,
+                )
+                if advance_reason is not None:
+                    segment_reached = True
+                    info["end_reason"] = advance_reason
             if segment_reached:
                 print(
-                    f"\n[Astar_planner] Segment {segment_index} reached in {step + 1} steps, "
-                    f"dist={distance:.2f}, axis_error={axis_error}"
+                    f"\n[Astar_planner] Segment {segment_index} reached in {step} steps, "
+                    f"dist={distance:.2f}, axis_error={axis_error}, reason={info.get('end_reason', 'arrived')}"
                 )
                 return {
                     "segment": segment_index,
                     "arrived": True,
-                    "steps": step + 1,
+                    "steps": step,
                     "reward": total_reward,
-                    "end_reason": "arrived",
+                    "end_reason": info.get("end_reason", "arrived"),
                     "distance": distance,
                     "axis_error": axis_error.tolist(),
+                    "safety_shield_interventions": self._shield_interventions(),
+                    "safety_shield_emergency_interventions": self._shield_emergencies(),
+                    "safety_shield_recovery_interventions": self._shield_recoveries(),
+                    "safety_shield_recovery_steps": self._shield_recovery_steps(),
                 }
 
             if terminated or truncated:
@@ -186,24 +259,99 @@ class TD3SegmentExecutor:
                 return {
                     "segment": segment_index,
                     "arrived": False,
-                    "steps": step + 1,
+                    "steps": step,
                     "reward": total_reward,
                     "end_reason": reason,
                     "distance": distance,
                     "axis_error": axis_error.tolist(),
+                    "safety_shield_interventions": self._shield_interventions(),
+                    "safety_shield_emergency_interventions": self._shield_emergencies(),
+                    "safety_shield_recovery_interventions": self._shield_recoveries(),
+                    "safety_shield_recovery_steps": self._shield_recovery_steps(),
                 }
 
         distance = float(last_info.get("dis2goal", np.inf))
-        print(f"\n[Astar_planner] Segment {segment_index} timeout, dist={distance:.2f}")
+        axis_error = self._axis_error_to_target(target)
+        advance_reason = self._intermediate_progress_advance_reason(
+            distance,
+            initial_segment_distance,
+            stalled_progress_steps,
+            is_final_segment,
+            timed_out=True,
+        )
+        if advance_reason is not None:
+            print(
+                f"\n[Astar_planner] Segment {segment_index} advanced after timeout "
+                f"in {step} steps, dist={distance:.2f}, axis_error={axis_error}, "
+                f"reason={advance_reason}"
+            )
+            return {
+                "segment": segment_index,
+                "arrived": True,
+                "steps": step,
+                "reward": total_reward,
+                "end_reason": advance_reason,
+                "distance": distance,
+                "axis_error": axis_error.tolist(),
+                "safety_shield_interventions": self._shield_interventions(),
+                "safety_shield_emergency_interventions": self._shield_emergencies(),
+                "safety_shield_recovery_interventions": self._shield_recoveries(),
+                "safety_shield_recovery_steps": self._shield_recovery_steps(),
+            }
+
+        print(
+            f"\n[Astar_planner] Segment {segment_index} timeout, "
+            f"dist={distance:.2f}, budget={step}"
+        )
         return {
             "segment": segment_index,
             "arrived": False,
-            "steps": config.SEGMENT_MAX_STEPS,
+            "steps": step,
             "reward": total_reward,
             "end_reason": "segment_timeout",
             "distance": distance,
-            "axis_error": self._axis_error_to_target(target).tolist(),
+            "axis_error": axis_error.tolist(),
+            "safety_shield_interventions": self._shield_interventions(),
+            "safety_shield_emergency_interventions": self._shield_emergencies(),
+            "safety_shield_recovery_interventions": self._shield_recoveries(),
+            "safety_shield_recovery_steps": self._shield_recovery_steps(),
         }
+
+    def _segment_step_budget(self):
+        base_steps = int(config.SEGMENT_MAX_STEPS)
+        if self.safety_shield is None:
+            return base_steps
+
+        step_extension = int(getattr(config, "SEGMENT_SHIELD_STEP_EXTENSION", 0))
+        max_extra_steps = int(getattr(config, "SEGMENT_SHIELD_MAX_EXTRA_STEPS", 0))
+        if step_extension <= 0 or max_extra_steps <= 0:
+            return base_steps
+
+        extra_steps = min(
+            max_extra_steps,
+            self._shield_recovery_steps() * step_extension,
+        )
+        return base_steps + int(extra_steps)
+
+    def _shield_interventions(self):
+        if self.safety_shield is None:
+            return 0
+        return int(self.safety_shield.interventions)
+
+    def _shield_emergencies(self):
+        if self.safety_shield is None:
+            return 0
+        return int(self.safety_shield.emergency_interventions)
+
+    def _shield_recoveries(self):
+        if self.safety_shield is None:
+            return 0
+        return int(self.safety_shield.recovery_interventions)
+
+    def _shield_recovery_steps(self):
+        if self.safety_shield is None:
+            return 0
+        return int(self.safety_shield.recovery_steps)
 
     def _teleport_to_segment_start(self, start, pose_start=None):
         """Place the first segment at the planned start, then climb before navigation."""
@@ -302,6 +450,74 @@ class TD3SegmentExecutor:
         if is_final_segment:
             return bool(np.all(axis_error <= config.FINAL_AXIS_TOLERANCE))
         return bool(np.all(axis_error <= config.INTERMEDIATE_AXIS_TOLERANCE))
+
+    def _update_stuck_near_target_steps(self, current_count, distance, progress, speed, is_final_segment):
+        if is_final_segment:
+            return 0
+        close_enough = float(distance) <= float(config.INTERMEDIATE_STUCK_ACCEPT_DISTANCE)
+        low_progress = abs(float(progress)) <= float(config.INTERMEDIATE_STUCK_PROGRESS_EPS)
+        slow = float(speed) <= float(config.INTERMEDIATE_STUCK_SPEED_MAX)
+        if close_enough and low_progress and slow:
+            return int(current_count) + 1
+        return 0
+
+    def _update_intermediate_stall_steps(self, current_count, progress, speed, step, is_final_segment):
+        if is_final_segment:
+            return 0
+        if int(step) < int(getattr(config, "INTERMEDIATE_STALL_MIN_STEPS", 0)):
+            return 0
+
+        low_progress = abs(float(progress)) <= float(config.INTERMEDIATE_STALL_PROGRESS_EPS)
+        slow = float(speed) <= float(config.INTERMEDIATE_STALL_SPEED_MAX)
+        if low_progress and slow:
+            return int(current_count) + 1
+        return 0
+
+    def _intermediate_progress_advance_reason(
+        self,
+        distance,
+        initial_distance,
+        stalled_progress_steps,
+        is_final_segment,
+        timed_out=False,
+    ):
+        if is_final_segment:
+            return None
+
+        if not self._intermediate_has_enough_progress(
+            distance,
+            initial_distance,
+            is_final_segment,
+        ):
+            return None
+
+        if timed_out:
+            return "intermediate_timeout_progressed"
+
+        if int(stalled_progress_steps) >= int(config.INTERMEDIATE_STALL_WINDOW):
+            return "intermediate_stalled_progressed"
+
+        return None
+
+    def _intermediate_has_enough_progress(self, distance, initial_distance, is_final_segment):
+        if is_final_segment:
+            return False
+
+        distance = float(distance)
+        initial_distance = float(initial_distance)
+        if not np.isfinite(distance) or not np.isfinite(initial_distance) or initial_distance <= 1e-6:
+            return False
+
+        distance_threshold = min(
+            float(config.INTERMEDIATE_ADVANCE_ACCEPT_DISTANCE),
+            initial_distance * float(config.INTERMEDIATE_ADVANCE_PROGRESS_RATIO),
+        )
+        min_progress = min(
+            float(config.INTERMEDIATE_ADVANCE_MIN_PROGRESS),
+            initial_distance * 0.25,
+        )
+        reduced_distance = initial_distance - distance
+        return bool(distance <= distance_threshold and reduced_distance >= min_progress)
 
     def close(self):
         try:
