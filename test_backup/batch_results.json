@@ -1,7 +1,7 @@
 {
-    "total": 40,
-    "arrived": 0,
-    "arrival_rate": "0.00%",
+    "total": 38,
+    "arrived": 25,
+    "arrival_rate": "65.78%",
     "details": [
         {
             "task_id": 1,
@@ -16,7 +16,7 @@
                 -16.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/6 reached)."
+            "msg": "Failed at segment 10: timeout (10/14 reached). Shield interventions=263, emergencies=21, recoveries=44, recovery_steps=263."
         },
         {
             "task_id": 2,
@@ -30,8 +30,8 @@
                 -13.19131592,
                 -14.84776611
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/4 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (7/7 segments). Shield interventions=240, emergencies=13, recoveries=40, recovery_steps=240."
         },
         {
             "task_id": 3,
@@ -45,8 +45,8 @@
                 125.18,
                 -4.9
             ],
-            "status": "failed",
-            "msg": "Failed at segment 3: collision (3/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (18/18 segments). Shield interventions=39, emergencies=0, recoveries=7, recovery_steps=39."
         },
         {
             "task_id": 4,
@@ -60,8 +60,8 @@
                 125.18,
                 -4.9
             ],
-            "status": "failed",
-            "msg": "Failed at segment 5: segment_timeout (5/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (13/13 segments). Shield interventions=18, emergencies=0, recoveries=3, recovery_steps=18."
         },
         {
             "task_id": 5,
@@ -75,8 +75,8 @@
                 -76.12,
                 -9.8
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: segment_timeout (0/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (15/15 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
             "task_id": 6,
@@ -90,8 +90,8 @@
                 -95.62,
                 -8.8
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (11/11 segments). Shield interventions=216, emergencies=2, recoveries=36, recovery_steps=216."
         },
         {
             "task_id": 7,
@@ -106,7 +106,7 @@
                 -11.6
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: segment_timeout (0/6 reached)."
+            "msg": "Failed at segment 7: collision (7/13 reached). Shield interventions=62, emergencies=5, recoveries=11, recovery_steps=62."
         },
         {
             "task_id": 8,
@@ -121,25 +121,10 @@
                 -11.3
             ],
             "status": "failed",
-            "msg": "Failed at segment 3: collision (3/7 reached)."
+            "msg": "Failed at segment 2: timeout (2/11 reached). Shield interventions=310, emergencies=13, recoveries=52, recovery_steps=310."
         },
         {
             "task_id": 9,
-            "start": [
-                23.5,
-                140.08,
-                -4.0
-            ],
-            "end": [
-                78.0,
-                -153.52,
-                -14.1
-            ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/8 reached)."
-        },
-        {
-            "task_id": 10,
             "start": [
                 23.5,
                 140.08,
@@ -150,11 +135,11 @@
                 -86.92,
                 -8.9
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (19/19 segments). Shield interventions=12, emergencies=0, recoveries=2, recovery_steps=12."
         },
         {
-            "task_id": 11,
+            "task_id": 10,
             "start": [
                 17.8,
                 -86.92,
@@ -165,11 +150,11 @@
                 163.38,
                 -8.94
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (17/17 segments). Shield interventions=48, emergencies=0, recoveries=8, recovery_steps=48."
         },
         {
-            "task_id": 12,
+            "task_id": 11,
             "start": [
                 -123.9,
                 -90.92,
@@ -180,11 +165,11 @@
                 1.48,
                 -9.0
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/2 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (5/5 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 13,
+            "task_id": 12,
             "start": [
                 -141.4,
                 -191.82,
@@ -196,10 +181,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/10 reached)."
+            "msg": "Failed at segment 1: segment_timeout (1/22 reached). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 14,
+            "task_id": 13,
             "start": [
                 103.4,
                 79.58,
@@ -210,11 +195,11 @@
                 118.98,
                 -4.0
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/7 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (18/18 segments). Shield interventions=66, emergencies=3, recoveries=11, recovery_steps=66."
         },
         {
-            "task_id": 15,
+            "task_id": 14,
             "start": [
                 -111.5,
                 118.98,
@@ -225,11 +210,11 @@
                 4.08,
                 -7.7
             ],
-            "status": "failed",
-            "msg": "Failed at segment 3: collision (3/7 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (15/15 segments). Shield interventions=6, emergencies=0, recoveries=1, recovery_steps=5."
         },
         {
-            "task_id": 16,
+            "task_id": 15,
             "start": [
                 78.3,
                 -148.32,
@@ -241,10 +226,10 @@
                 -5.3
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/7 reached)."
+            "msg": "Failed at segment 10: segment_timeout (10/27 reached). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 17,
+            "task_id": 16,
             "start": [
                 150.3,
                 37.28,
@@ -255,11 +240,11 @@
                 -198.02,
                 -13.3
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (19/19 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 18,
+            "task_id": 17,
             "start": [
                 84.8,
                 -145.42,
@@ -271,10 +256,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/4 reached)."
+            "msg": "Failed at segment 5: collision (5/9 reached). Shield interventions=205, emergencies=6, recoveries=35, recovery_steps=205."
         },
         {
-            "task_id": 19,
+            "task_id": 18,
             "start": [
                 -94.8,
                 92.08,
@@ -285,11 +270,11 @@
                 76.88,
                 -4.0
             ],
-            "status": "failed",
-            "msg": "Failed at segment 2: collision (2/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (16/16 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 20,
+            "task_id": 19,
             "start": [
                 107.0,
                 -82.52,
@@ -301,10 +286,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: segment_timeout (0/6 reached)."
+            "msg": "Failed at segment 9: timeout (9/13 reached). Shield interventions=330, emergencies=19, recoveries=55, recovery_steps=330."
         },
         {
-            "task_id": 21,
+            "task_id": 20,
             "start": [
                 -75.1,
                 -8.22,
@@ -315,11 +300,11 @@
                 29.68,
                 -6.6
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/7 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (13/13 segments). Shield interventions=78, emergencies=0, recoveries=13, recovery_steps=74."
         },
         {
-            "task_id": 22,
+            "task_id": 21,
             "start": [
                 -10.97211182,
                 -13.19131592,
@@ -331,10 +316,10 @@
                 -3.9
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: segment_timeout (0/4 reached)."
+            "msg": "Failed at segment 5: timeout (5/8 reached). Shield interventions=182, emergencies=4, recoveries=31, recovery_steps=182."
         },
         {
-            "task_id": 23,
+            "task_id": 22,
             "start": [
                 -106.2,
                 125.18,
@@ -345,11 +330,11 @@
                 78.28,
                 -7.4
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (18/18 segments). Shield interventions=39, emergencies=0, recoveries=6, recovery_steps=36."
         },
         {
-            "task_id": 24,
+            "task_id": 23,
             "start": [
                 -106.2,
                 125.18,
@@ -360,11 +345,11 @@
                 3.18,
                 -7.2
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/5 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (13/13 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 25,
+            "task_id": 24,
             "start": [
                 -10.1,
                 -76.12,
@@ -375,11 +360,11 @@
                 125.18,
                 -4.9
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/9 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (15/15 segments). Shield interventions=126, emergencies=0, recoveries=21, recovery_steps=126."
         },
         {
-            "task_id": 26,
+            "task_id": 25,
             "start": [
                 -60.9,
                 -95.62,
@@ -390,11 +375,11 @@
                 3.18,
                 -7.4
             ],
-            "status": "failed",
-            "msg": "Failed at segment 2: collision (2/5 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (11/11 segments). Shield interventions=162, emergencies=0, recoveries=27, recovery_steps=162."
         },
         {
-            "task_id": 27,
+            "task_id": 26,
             "start": [
                 -61.0,
                 -139.82,
@@ -406,10 +391,10 @@
                 -5.4
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/5 reached)."
+            "msg": "Failed at segment 1: timeout (1/13 reached). Shield interventions=171, emergencies=20, recoveries=29, recovery_steps=171."
         },
         {
-            "task_id": 28,
+            "task_id": 27,
             "start": [
                 57.9,
                 19.78,
@@ -420,26 +405,11 @@
                 -85.22,
                 -5.6
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (11/11 segments). Shield interventions=84, emergencies=6, recoveries=14, recovery_steps=84."
         },
         {
-            "task_id": 29,
-            "start": [
-                78.0,
-                -153.52,
-                -14.1
-            ],
-            "end": [
-                23.5,
-                140.08,
-                -4.0
-            ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/9 reached)."
-        },
-        {
-            "task_id": 30,
+            "task_id": 28,
             "start": [
                 17.8,
                 -86.92,
@@ -450,11 +420,11 @@
                 140.08,
                 -4.0
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/7 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (19/19 segments). Shield interventions=140, emergencies=2, recoveries=24, recovery_steps=140."
         },
         {
-            "task_id": 31,
+            "task_id": 29,
             "start": [
                 -10.5,
                 163.38,
@@ -465,11 +435,11 @@
                 -86.92,
                 -8.9
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (17/17 segments). Shield interventions=36, emergencies=0, recoveries=6, recovery_steps=36."
         },
         {
-            "task_id": 32,
+            "task_id": 30,
             "start": [
                 -117.3,
                 1.48,
@@ -481,10 +451,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/3 reached)."
+            "msg": "Failed at segment 0: collision (0/5 reached). Shield interventions=48, emergencies=4, recoveries=8, recovery_steps=48."
         },
         {
-            "task_id": 33,
+            "task_id": 31,
             "start": [
                 -125.1,
                 185.28,
@@ -496,10 +466,10 @@
                 -9.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: segment_timeout (0/10 reached)."
+            "msg": "Failed at segment 5: segment_timeout (5/22 reached). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 34,
+            "task_id": 32,
             "start": [
                 -111.5,
                 118.98,
@@ -511,10 +481,10 @@
                 -9.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/6 reached)."
+            "msg": "Failed at segment 9: collision (9/18 reached). Shield interventions=17, emergencies=1, recoveries=3, recovery_steps=17."
         },
         {
-            "task_id": 35,
+            "task_id": 33,
             "start": [
                 63.1,
                 4.08,
@@ -526,10 +496,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 2: collision (2/8 reached)."
+            "msg": "Failed at segment 14: collision (14/15 reached). Shield interventions=48, emergencies=3, recoveries=8, recovery_steps=48."
         },
         {
-            "task_id": 36,
+            "task_id": 34,
             "start": [
                 101.7,
                 130.78,
@@ -540,11 +510,11 @@
                 -148.32,
                 -9.4
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/8 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (29/29 segments). Shield interventions=48, emergencies=0, recoveries=8, recovery_steps=48."
         },
         {
-            "task_id": 37,
+            "task_id": 35,
             "start": [
                 72.7,
                 -198.02,
@@ -555,11 +525,11 @@
                 37.28,
                 -10.4
             ],
-            "status": "failed",
-            "msg": "Failed at segment 0: collision (0/7 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (16/16 segments). Shield interventions=0, emergencies=0, recoveries=0, recovery_steps=0."
         },
         {
-            "task_id": 38,
+            "task_id": 36,
             "start": [
                 -64.4,
                 -146.72,
@@ -571,10 +541,10 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/4 reached)."
+            "msg": "Failed at segment 1: timeout (1/9 reached). Shield interventions=186, emergencies=28, recoveries=31, recovery_steps=186."
         },
         {
-            "task_id": 39,
+            "task_id": 37,
             "start": [
                 118.1,
                 76.88,
@@ -585,11 +555,11 @@
                 92.08,
                 -4.0
             ],
-            "status": "failed",
-            "msg": "Failed at segment 1: collision (1/6 reached)."
+            "status": "success",
+            "msg": "Success: Reached destination (16/16 segments). Shield interventions=62, emergencies=2, recoveries=10, recovery_steps=56."
         },
         {
-            "task_id": 40,
+            "task_id": 38,
             "start": [
                 -63.8,
                 -136.72,
@@ -601,7 +571,7 @@
                 -4.0
             ],
             "status": "failed",
-            "msg": "Failed at segment 0: collision (0/5 reached)."
+            "msg": "Failed at segment 3: collision (3/13 reached). Shield interventions=199, emergencies=20, recoveries=35, recovery_steps=199."
         }
     ]
 }
